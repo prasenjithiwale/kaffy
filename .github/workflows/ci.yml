@@ -28,6 +28,10 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      - name: Install build dependencies
+        # librdkafka includes <curl/curl.h> even when built without curl (an
+        # #ifdef on a macro that is always defined). Headers only: nothing links it.
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libcurl4-openssl-dev
 
       - name: Format
         run: cargo fmt --all --check
