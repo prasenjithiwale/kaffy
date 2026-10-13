@@ -662,6 +662,9 @@ impl Cluster {
                     "schema registry: 404 Not Found: Schema {schema_id} not found"
                 ));
             }
+            Some(Payload::Protobuf { .. }) => {
+                return Err("the demo cluster has no Protobuf schemas".to_owned());
+            }
         };
         let offset = self.end(&request.topic, partition);
         *self

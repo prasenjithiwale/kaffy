@@ -16,6 +16,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use tokio::sync::Mutex;
 
+use crate::protobuf::{self, ProtoSchema};
 use crate::{Decoded, SchemaType, wire_header};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -42,7 +43,7 @@ enum Parsed {
         references: Vec<AvroSchema>,
     },
     Json,
-    Protobuf,
+    Protobuf(ProtoSchema),
 }
 
 #[derive(Deserialize)]
@@ -58,6 +59,9 @@ struct SchemaResponse {
 
 #[derive(Deserialize)]
 struct Reference {
+    /// The name the schema imports it by (Protobuf), or its type name (Avro).
+    #[serde(default)]
+    name: String,
     subject: String,
     version: i32,
 }
@@ -97,6 +101,7 @@ impl Registry {
             Err(error) => Decoded {
                 schema_id,
                 schema_type: None,
+                message: None,
                 result: Err(error),
             },
         })
@@ -115,6 +120,24 @@ impl Registry {
             return Err(format!("schema {schema_id} is not an Avro schema"));
         };
         encode_avro_body(schema, references, json).map(|body| wire(schema_id, &body))
+    }
+
+    /// Encodes `json` as Protobuf message `message` of schema `schema_id`, in
+    /// the Confluent wire format (with the message-index path).
+    pub async fn encode_protobuf(
+        &self,
+        schema_id: u32,
+        message: &str,
+        json: &serde_json::Value,
+    ) -> Result<Vec<u8>, String> {
+        let parsed = self.schema(schema_id).await?;
+        let Parsed::Protobuf(proto) = parsed.as_ref() else {
+            return Err(format!("schema {schema_id} is not a Protobuf schema"));
+        };
+        let descriptor = proto.message(message)?;
+        let mut body = protobuf::write_indexes(&proto.indexes_of(&descriptor)?);
+        body.extend(protobuf::encode(&descriptor, json)?);
+        Ok(wire(schema_id, &body))
     }
 
     async fn schema(&self, id: u32) -> Result<Arc<Parsed>, String> {
@@ -146,16 +169,25 @@ impl Registry {
         match response.schema_type.as_deref().unwrap_or("AVRO") {
             "AVRO" => {
                 let references = self.fetch_references(response.references).await?;
-                parse_avro(&response.schema, &references)
+                let sources: Vec<String> =
+                    references.into_iter().map(|(_, schema)| schema).collect();
+                parse_avro(&response.schema, &sources)
             }
             "JSON" => Ok(Parsed::Json),
-            "PROTOBUF" => Ok(Parsed::Protobuf),
+            "PROTOBUF" => {
+                let imports = self.fetch_references(response.references).await?;
+                ProtoSchema::compile(&response.schema, &imports).map(Parsed::Protobuf)
+            }
             other => Err(format!("schema {id} has unknown type {other:?}")),
         }
     }
 
-    /// Fetches the schemas behind `references`, and theirs, transitively.
-    async fn fetch_references(&self, references: Vec<Reference>) -> Result<Vec<String>, String> {
+    /// Fetches the schemas behind `references`, and theirs, transitively, as
+    /// (import name, source) pairs.
+    async fn fetch_references(
+        &self,
+        references: Vec<Reference>,
+    ) -> Result<Vec<(String, String)>, String> {
         let mut pending = references;
         let mut seen = HashSet::new();
         let mut schemas = Vec::new();
@@ -175,7 +207,7 @@ impl Registry {
                 ])
                 .await?;
             pending.extend(response.references);
-            schemas.push(response.schema);
+            schemas.push((reference.name, response.schema));
         }
         Ok(schemas)
     }
@@ -489,14 +521,32 @@ fn decode_with(parsed: &Parsed, schema_id: u32, bytes: &[u8]) -> Decoded {
             SchemaType::Json,
             serde_json::from_slice(body).map_err(|e| format!("invalid JSON payload: {e}")),
         ),
-        Parsed::Protobuf => (
-            SchemaType::Protobuf,
-            Err("Protobuf decoding is not supported yet".to_owned()),
-        ),
+        Parsed::Protobuf(proto) => {
+            let decoded = protobuf::read_indexes(body).and_then(|(indexes, payload)| {
+                let message = proto.message_at(&indexes)?;
+                let json = protobuf::decode(&message, payload);
+                Ok((message.full_name().to_owned(), json))
+            });
+            return match decoded {
+                Ok((message, result)) => Decoded {
+                    schema_id,
+                    schema_type: Some(SchemaType::Protobuf),
+                    message: Some(message),
+                    result,
+                },
+                Err(e) => Decoded {
+                    schema_id,
+                    schema_type: Some(SchemaType::Protobuf),
+                    message: None,
+                    result: Err(e),
+                },
+            };
+        }
     };
     Decoded {
         schema_id,
         schema_type: Some(schema_type),
+        message: None,
         result,
     }
 }
@@ -516,6 +566,7 @@ pub fn decode_avro(schema: &AvroSchema, bytes: &[u8]) -> Option<Decoded> {
     Some(Decoded {
         schema_id,
         schema_type: Some(SchemaType::Avro),
+        message: None,
         result: decode_avro_body(schema, &[], body),
     })
 }

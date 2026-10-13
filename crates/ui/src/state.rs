@@ -2298,6 +2298,7 @@ mod tests {
         let decoded = |result| kaffy_schema::Decoded {
             schema_id: 7,
             schema_type: Some(kaffy_schema::SchemaType::Avro),
+            message: None,
             result,
         };
         let avro = |offset, result| Record {

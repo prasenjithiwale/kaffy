@@ -15,6 +15,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::admin::{self, Admin};
+use crate::decoders::Decoders;
 use crate::groups::Groups;
 use crate::replay;
 use crate::{
@@ -41,6 +42,7 @@ pub fn spawn(profile: &Profile) -> Result<Worker, Error> {
         )),
         None => None,
     };
+    let decoders = Decoders::new(registry.clone(), &profile.protobuf).map_err(Error::Protobuf)?;
 
     let (command_tx, command_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::channel(EVENT_BUFFER);
@@ -49,6 +51,7 @@ pub fn spawn(profile: &Profile) -> Result<Worker, Error> {
         base,
         metadata,
         registry,
+        decoders,
         producer: Arc::new(OnceLock::new()),
         admin: Arc::new(OnceLock::new()),
         read_only: profile.read_only,
@@ -97,6 +100,7 @@ struct Context {
     metadata: Arc<BaseConsumer>,
     groups: Arc<Groups>,
     registry: Option<Arc<Registry>>,
+    decoders: Decoders,
     /// Created on the first write, so read-only sessions never open one.
     producer: Arc<OnceLock<FutureProducer>>,
     /// Created on first use, like the producer.
@@ -227,7 +231,7 @@ async fn run(ctx: Context, mut commands: mpsc::UnboundedReceiver<Command>) {
                 let (control, control_rx) = mpsc::unbounded_channel();
                 let task = tokio::spawn(run_tail(
                     viewer_config(&ctx.base),
-                    ctx.registry.clone(),
+                    ctx.decoders.clone(),
                     session,
                     topic,
                     start,
@@ -355,7 +359,7 @@ async fn run(ctx: Context, mut commands: mpsc::UnboundedReceiver<Command>) {
                 let job = replay::Job {
                     config: viewer_config(&ctx.base),
                     producer,
-                    registry: ctx.registry.clone(),
+                    decoders: ctx.decoders.clone(),
                     id,
                     plan,
                     filter,
@@ -540,6 +544,22 @@ async fn produce(ctx: &Context, request: ProduceRequest) -> Result<(i32, i64), S
                 .ok_or("this profile has no Schema Registry to encode Avro with")?;
             Some(registry.encode_avro(schema_id, &json).await?)
         }
+        Some(Payload::Protobuf {
+            schema_id: Some(schema_id),
+            message,
+            json,
+        }) => {
+            let registry = ctx
+                .registry
+                .as_ref()
+                .ok_or("this profile has no Schema Registry to encode Protobuf with")?;
+            Some(registry.encode_protobuf(schema_id, &message, &json).await?)
+        }
+        Some(Payload::Protobuf {
+            schema_id: None,
+            message,
+            json,
+        }) => Some(ctx.decoders.encode_local(&request.topic, &message, &json)?),
     };
     let mut headers = OwnedHeaders::new_with_capacity(request.headers.len());
     for h in &request.headers {
@@ -601,14 +621,14 @@ fn fetch_topics(consumer: &BaseConsumer) -> KafkaResult<(usize, Vec<TopicInfo>)>
 
 async fn run_tail(
     config: ClientConfig,
-    registry: Option<Arc<Registry>>,
+    decoders: Decoders,
     session: u64,
     topic: String,
     start: StartAt,
     control: mpsc::UnboundedReceiver<Command>,
     events: mpsc::Sender<Event>,
 ) {
-    if let Err(e) = tail(config, registry, session, &topic, start, control, &events).await {
+    if let Err(e) = tail(config, decoders, session, &topic, start, control, &events).await {
         let _ = events
             .send(Event::Error(format!("tail {topic}: {e}")))
             .await;
@@ -617,7 +637,7 @@ async fn run_tail(
 
 async fn tail(
     config: ClientConfig,
-    registry: Option<Arc<Registry>>,
+    decoders: Decoders,
     session: u64,
     topic: &str,
     start: StartAt,
@@ -650,8 +670,8 @@ async fn tail(
                 Some(Ok(message)) => {
                     let mut record = to_record(&message);
                     drop(message);
-                    if let Some(registry) = &registry {
-                        decode_record(registry, &mut record).await;
+                    if decoders.is_active() {
+                        decoders.decode(&mut record).await;
                     }
                     let event = Event::Record {
                         session,
@@ -716,16 +736,6 @@ fn assign(consumer: &StreamConsumer, topic: &str, start: StartAt) -> KafkaResult
     }
     consumer.assign(&tpl)?;
     Ok(topic_md.partitions().len())
-}
-
-async fn decode(registry: &Registry, bytes: Option<&[u8]>) -> Option<kaffy_schema::Decoded> {
-    registry.decode(bytes?).await
-}
-
-/// Fills in the decoded key and value of a Schema Registry payload.
-pub(crate) async fn decode_record(registry: &Registry, record: &mut Record) {
-    record.key_decoded = decode(registry, record.key.as_deref()).await;
-    record.value_decoded = decode(registry, record.value.as_deref()).await;
 }
 
 pub(crate) fn to_record(message: &BorrowedMessage<'_>) -> Record {

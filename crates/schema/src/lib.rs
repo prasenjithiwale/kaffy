@@ -5,6 +5,7 @@
 //! Schema Registry by [`Registry`]; the result travels with the record as a
 //! [`Decoded`] and takes precedence when rendering.
 
+pub mod protobuf;
 mod registry;
 
 use std::fmt::Write as _;
@@ -73,9 +74,12 @@ pub fn pretty_schema(schema_type: SchemaType, schema: &str) -> String {
 /// A Schema Registry payload after decoding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Decoded {
+    /// The registry schema id; 0 when decoded with local `.proto` files.
     pub schema_id: u32,
     /// `None` when the schema could not be fetched.
     pub schema_type: Option<SchemaType>,
+    /// The Protobuf message type, e.g. `acme.Order`.
+    pub message: Option<String>,
     pub result: Result<serde_json::Value, String>,
 }
 
@@ -119,7 +123,11 @@ pub fn detect(bytes: &[u8]) -> Format {
 pub fn render(bytes: &[u8], decoded: Option<&Decoded>) -> Rendered {
     if let Some(decoded) = decoded {
         let kind = decoded.schema_type.map_or("schema", SchemaType::label);
-        let label = format!("{kind} · schema {}", decoded.schema_id);
+        let label = match (&decoded.message, decoded.schema_id) {
+            (Some(message), 0) => format!("{kind} · {message} (local .proto)"),
+            (Some(message), id) => format!("{kind} · schema {id} · {message}"),
+            (None, id) => format!("{kind} · schema {id}"),
+        };
         return match &decoded.result {
             Ok(value) => Rendered {
                 label,
@@ -286,6 +294,7 @@ mod tests {
         let ok = Decoded {
             schema_id: 7,
             schema_type: Some(SchemaType::Avro),
+            message: None,
             result: Ok(serde_json::json!({"id": 1})),
         };
         let rendered = render(&bytes, Some(&ok));
@@ -297,6 +306,7 @@ mod tests {
         let failed = Decoded {
             schema_id: 7,
             schema_type: None,
+            message: None,
             result: Err("schema registry: 404 Not Found".into()),
         };
         let rendered = render(&bytes, Some(&failed));

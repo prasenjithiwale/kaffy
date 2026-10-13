@@ -67,10 +67,7 @@ struct TestTopic {
 
 impl TestTopic {
     async fn create() -> Self {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
+        let nanos = unique_suffix();
         let name = format!("kaffy-test-{nanos}");
         let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
             .set("bootstrap.servers", bootstrap())
@@ -267,10 +264,7 @@ fn writable() -> Profile {
 }
 
 fn unique(prefix: &str) -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
+    let nanos = unique_suffix();
     format!("{prefix}-{nanos}")
 }
 
@@ -572,6 +566,18 @@ async fn produce_and_filtered_replay() {
 // ---- Phase 3: topic administration ----
 
 use kaffy_kafka::{ConfigSource, NewTopic as TopicSpec};
+
+/// Clock time plus a counter: macOS clocks tick in microseconds, so parallel
+/// tests could otherwise pick the same name.
+fn unique_suffix() -> String {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let micros = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_micros();
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{micros}-{n}")
+}
 
 fn config_value(
     entries: &[kaffy_kafka::ConfigEntry],

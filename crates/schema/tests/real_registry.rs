@@ -12,6 +12,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use kaffy_schema::{Registry, SchemaType};
 use serde_json::json;
 
+/// Clock time plus a counter: macOS clocks tick in microseconds, so parallel
+/// tests could otherwise pick the same name.
+fn unique_suffix() -> String {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let micros = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_micros();
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{micros}-{n}")
+}
+
 fn url() -> String {
     std::env::var("KAFFY_TEST_SR").unwrap_or_else(|_| "http://localhost:8081".to_owned())
 }
@@ -21,10 +33,7 @@ struct TestSubject(String);
 
 impl TestSubject {
     fn new() -> Self {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
+        let nanos = unique_suffix();
         Self(format!("kaffy-test-{nanos}-value"))
     }
 

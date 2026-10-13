@@ -131,7 +131,7 @@ Estimates are rough, for one developer working part-time.
 - [x] Topic list with metadata
 - [x] Live tail with pause/resume
 - [x] Seek: beginning, end, offset, timestamp
-- [x] JSON and Avro (via SR) decoding (tested against a mock registry; not yet against Confluent SR)
+- [x] JSON and Avro (via SR) decoding
 - [x] Filters: key, value contains / regex, partition, time range
 - [x] Message detail pane with syntax highlighting
 - [x] Copy key/value to clipboard
@@ -145,12 +145,12 @@ Estimates are rough, for one developer working part-time.
 - [x] Export to JSON / NDJSON / CSV
 
 ### Phase 3: Schema & Admin (~4 weeks)
-- [ ] Schema Registry: subjects, versions, diff
-- [ ] Compatibility check, then register a new version
-- [ ] Protobuf decoding (SR and local descriptors)
-- [ ] Topic create / delete / config edit
-- [ ] DeleteRecords (truncate) and tombstones
-- [ ] Read-only mode and prod-safety confirmations
+- [x] Schema Registry: subjects, versions, diff
+- [x] Compatibility check, then register a new version
+- [x] Protobuf decoding (SR and local descriptors)
+- [x] Topic create / delete / config edit
+- [x] DeleteRecords (truncate) and tombstones
+- [x] Read-only mode and prod-safety confirmations
 
 ### Phase 4: Polish
 - [ ] Themes (light/dark), configurable keybindings

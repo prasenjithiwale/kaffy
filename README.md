@@ -36,20 +36,46 @@ Profiles are read-only unless `read_only = false`.
 Payloads in the Confluent wire format (magic byte + schema id) are decoded through a Confluent-compatible
 Schema Registry, set per profile with `schema_registry = { url = "...", username = "...", password_env = "..." }`
 or with `--schema-registry <url>`. Avro is decoded to JSON (including schemas that reference other subjects);
-JSON Schema payloads are shown as JSON; Protobuf decoding is not implemented yet.
+JSON Schema payloads are shown as JSON, and Protobuf messages as JSON with their `.proto` field names
+(the message type is read from the message-index path, so nested messages work too).
 Schemas are cached per id, and the filter and clipboard work on the decoded JSON.
 Without a registry, such payloads are shown as a hex dump labelled with their schema id.
 
+### Protobuf without a registry
+
+For topics carrying plain Protobuf, point kaffy at the `.proto` files (compiled in-process, no `protoc`
+needed; Google's well-known types are built in):
+
+```toml
+[[profiles.local.protobuf]]
+topic = "orders-proto"
+files = ["proto/orders.proto"]   # relative to the config file
+include = ["proto"]              # where imports are looked up
+value = "acme.Order"             # key = "acme.OrderKey" too, if keys are Protobuf
+```
+
+The files are compiled at startup, so a mistake is reported before the UI opens.
+
+### Schemas
+
+The schemas tab (`3`) lists every subject with its type and latest version. A subject shows its versions;
+`d` diffs a version with the one before it. `e` opens the latest schema in `$EDITOR`; the result is checked
+for compatibility (with the registry's explanation when it isn't), shown as a diff, and registered only once
+you confirm. `n` registers a new subject from an Avro, JSON Schema or Protobuf starting point.
+
 ## Keys
 
-Press `?` on any screen for its keys. `1` and `2` switch between topics and consumer groups.
+Press `?` on any screen for its keys. `1`, `2` and `3` switch between topics, consumer groups and schemas.
 
 | Screen | Keys |
 |---|---|
 | everywhere | `↑↓`/`jk` move, `PgUp`/`PgDn`/`Ctrl-u`/`Ctrl-d` page, `g`/`G` top/bottom, `esc` back (clears an active filter first), `?` help, `q`/`Ctrl-c` quit |
-| topics | `⏎` open, `/` filter, `r` refresh |
-| messages | `⏎` detail, `space` pause/resume, `/` filter (see below), `b` from beginning, `e` from end, `o` seek to offset, `t` seek to time (`-15m`, `2026-10-13 09:30`, RFC 3339, epoch ms), `r` reload, `y`/`Y` copy value/key, `p` produce, `E` edit & produce, `X` replay, `x` export |
-| detail | `↑↓` scroll, `y`/`Y` copy value/key, `E` edit & produce |
+| topics | `⏎` open, `/` filter, `r` refresh, `c` config, `n` new topic, `D` delete topic, `T` delete records |
+| messages | `⏎` detail, `space` pause/resume, `/` filter (see below), `b` from beginning, `e` from end, `o` seek to offset, `t` seek to time (`-15m`, `2026-10-13 09:30`, RFC 3339, epoch ms), `r` reload, `y`/`Y` copy value/key, `p` produce, `E` edit & produce, `K` tombstone, `X` replay, `x` export |
+| detail | `↑↓` scroll, `y`/`Y` copy value/key, `E` edit & produce, `K` tombstone |
+| topic config | `⏎` change a value, `u` reset to the inherited value |
+| schemas | `⏎` open, `n` new subject, `/` filter |
+| subject | `↑↓` version, `d` diff with the previous version, `e` edit & register |
 | groups | `⏎` open, `R` reset offsets, `/` filter, `r` refresh |
 | group detail | `R` reset offsets, `r` refresh |
 
@@ -99,6 +125,14 @@ on profiles with `prod = true` you type the group or topic name instead.
   working directory. Decoded Avro and JSON are written as JSON; binary payloads as base64. Export works on
   read-only profiles, since it doesn't write to Kafka.
 
+- **Topics** (`n`, `D`, `c`): create topics, delete them, and change their configs. A config change keeps the
+  topic's other settings, and kaffy reads the config back to confirm it took effect.
+- **Delete records** (`T`): remove everything before an offset or a time (DeleteRecords). **Tombstones**
+  (`K` on a message): produce a null value for its key, which deletes the key on compacted topics.
+
+Deleting a topic and deleting records can't be undone, so they always require typing the topic name,
+on every profile.
+
 `kaffy --demo` accepts all of these against its fake cluster, so you can try them safely.
 
 ## Layout
@@ -136,6 +170,12 @@ Broker data lives in `/opt/homebrew/var/lib/kraft-combined-logs`, logs in `/opt/
 cargo test --workspace
 cargo clippy --workspace --all-targets
 cargo test -p kaffy-kafka --test local_broker -- --ignored   # end-to-end, needs a broker on localhost:9092
+
+# Schema Registry features: Kafka on 29092 and Confluent Schema Registry on 8081 in Docker
+docker compose -f dev/docker-compose.yml up -d --wait
+cargo test -p kaffy-schema --test real_registry -- --ignored
+cargo test -p kaffy-kafka --test schema_registry -- --ignored
+cargo run -- --bootstrap localhost:29092 --schema-registry http://localhost:8081
 ```
 
 ## Releases

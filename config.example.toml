@@ -25,3 +25,11 @@ tls = { ca_location = "/etc/kaffy/ca.pem", certificate_location = "/etc/kaffy/cl
 [profiles.prod-mtls.librdkafka]
 "socket.timeout.ms" = "10000"
 "client.rack" = "eu-west-1a"
+
+# Topics whose messages are plain Protobuf (no Schema Registry). Paths are relative to this file.
+[[profiles.local.protobuf]]
+topic = "orders-proto"
+files = ["proto/orders.proto"]
+include = ["proto"]
+value = "acme.Order"
+# key = "acme.OrderKey"

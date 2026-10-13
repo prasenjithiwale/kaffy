@@ -523,6 +523,7 @@ fn decode_sensor_reading(bytes: &[u8]) -> Decoded {
     Decoded {
         schema_id: decoded.schema_id,
         schema_type: None,
+        message: None,
         result: Err(format!(
             "schema registry: 404 Not Found: Schema {} not found",
             decoded.schema_id

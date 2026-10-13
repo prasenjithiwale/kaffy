@@ -6,6 +6,7 @@
 
 mod admin;
 mod client;
+mod decoders;
 mod demo;
 mod groups;
 mod replay;
@@ -30,6 +31,8 @@ pub enum Error {
     Kafka(#[from] rdkafka::error::KafkaError),
     #[error("{0}")]
     SchemaRegistry(String),
+    #[error("{0}")]
+    Protobuf(String),
 }
 
 pub struct Worker {
@@ -259,6 +262,13 @@ pub enum Payload {
     /// JSON to encode as Avro with this Schema Registry schema.
     Avro {
         schema_id: u32,
+        json: serde_json::Value,
+    },
+    /// JSON to encode as Protobuf message `message`, with this Schema Registry
+    /// schema, or with the topic's local `.proto` files when `None`.
+    Protobuf {
+        schema_id: Option<u32>,
+        message: String,
         json: serde_json::Value,
     },
 }

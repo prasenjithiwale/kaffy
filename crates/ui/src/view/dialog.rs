@@ -217,6 +217,17 @@ pub fn render(frame: &mut Frame, state: &AppState) {
                     format!("JSON encoded as Avro with schema {schema_id}"),
                     serde_json::to_string_pretty(json).expect("a Value always serializes"),
                 ),
+                Some(Payload::Protobuf {
+                    schema_id,
+                    message,
+                    json,
+                }) => (
+                    match schema_id {
+                        Some(id) => format!("JSON encoded as Protobuf {message} with schema {id}"),
+                        None => format!("JSON encoded as Protobuf {message} (local .proto)"),
+                    },
+                    serde_json::to_string_pretty(json).expect("a Value always serializes"),
+                ),
             };
             lines.push(field("Value", format));
             for line in body.lines().take(MAX_ROWS) {

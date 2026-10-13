@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 kaffy-config.workspace = true
 kaffy-schema.workspace = true
+prost-reflect.workspace = true
 apache-avro.workspace = true
 serde_json.workspace = true
 futures.workspace = true
@@ -17,4 +18,5 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+reqwest.workspace = true
 tokio = { workspace = true, features = ["net", "io-util"] }

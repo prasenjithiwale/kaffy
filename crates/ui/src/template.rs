@@ -20,11 +20,17 @@ use kaffy_kafka::{Header, Payload, ProduceRequest, Record};
 const SEPARATOR: &str = "---";
 
 /// How the value text is turned into bytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ValueFormat {
     Text,
     /// JSON encoded as Avro with this Schema Registry schema id.
     Avro(u32),
+    /// JSON encoded as this Protobuf message, with a Schema Registry schema or
+    /// (`None`) the topic's local `.proto` files.
+    Protobuf {
+        schema_id: Option<u32>,
+        message: String,
+    },
 }
 
 /// A blank template for a new message on `topic`.
@@ -44,11 +50,27 @@ pub fn from_record(record: &Record) -> String {
             Some(kaffy_schema::Decoded {
                 schema_id,
                 schema_type: Some(kaffy_schema::SchemaType::Avro),
+                message: None,
                 result: Ok(json),
             }),
             _,
         ) => (
             ValueFormat::Avro(*schema_id),
+            serde_json::to_string_pretty(json).expect("a Value always serializes"),
+        ),
+        (
+            Some(kaffy_schema::Decoded {
+                schema_id,
+                schema_type: Some(kaffy_schema::SchemaType::Protobuf),
+                message: Some(message),
+                result: Ok(json),
+            }),
+            _,
+        ) => (
+            ValueFormat::Protobuf {
+                schema_id: (*schema_id != 0).then_some(*schema_id),
+                message: message.clone(),
+            },
             serde_json::to_string_pretty(json).expect("a Value always serializes"),
         ),
         (_, None) => (ValueFormat::Text, "null".to_owned()),
@@ -89,7 +111,8 @@ fn render(
          # partition: a number, or auto to let the key decide (as Java producers do)\n\
          # key:       leave empty for no key\n\
          # header:    one line per header, name=value\n\
-         # value-format: text (sent as written), or avro <schema id> (JSON encoded as Avro)\n\
+         # value-format: text (sent as written), avro <schema id>, protobuf <schema id> <message>,\n\
+         #               or protobuf local <message> (JSON encoded with the schema)\n\
          # The value is everything below ---. Write exactly null for a tombstone.\n\
          topic: {topic}\n\
          partition: {}\n\
@@ -108,6 +131,14 @@ fn render(
     out.push_str(&match format {
         ValueFormat::Text => "value-format: text\n".to_owned(),
         ValueFormat::Avro(id) => format!("value-format: avro {id}\n"),
+        ValueFormat::Protobuf {
+            schema_id: Some(id),
+            message,
+        } => format!("value-format: protobuf {id} {message}\n"),
+        ValueFormat::Protobuf {
+            schema_id: None,
+            message,
+        } => format!("value-format: protobuf local {message}\n"),
     });
     out.push_str(SEPARATOR);
     out.push('\n');
@@ -174,16 +205,31 @@ pub fn parse(text: &str, id: u64) -> Result<Option<ProduceRequest>, String> {
                     value: Some(value.as_bytes().to_vec()),
                 });
             }
-            "value-format" => {
-                format = match rest.split_whitespace().collect::<Vec<_>>().as_slice() {
-                    ["text"] => ValueFormat::Text,
-                    ["avro", id] => ValueFormat::Avro(
-                        id.parse()
-                            .map_err(|_| error("avro needs a schema id, e.g. avro 7"))?,
-                    ),
-                    _ => return Err(error("value-format must be text or avro <schema id>")),
+            "value-format" => format = match rest.split_whitespace().collect::<Vec<_>>().as_slice()
+            {
+                ["text"] => ValueFormat::Text,
+                ["avro", id] => ValueFormat::Avro(
+                    id.parse()
+                        .map_err(|_| error("avro needs a schema id, e.g. avro 7"))?,
+                ),
+                ["protobuf", "local", message] => ValueFormat::Protobuf {
+                    schema_id: None,
+                    message: message.to_string(),
+                },
+                ["protobuf", id, message] => ValueFormat::Protobuf {
+                    schema_id: Some(id.parse().map_err(|_| {
+                        error(
+                            "protobuf needs a schema id and a message, e.g. protobuf 12 acme.Order",
+                        )
+                    })?),
+                    message: message.to_string(),
+                },
+                _ => {
+                    return Err(error(
+                        "value-format must be text, avro <schema id>, protobuf <schema id> <message> or protobuf local <message>",
+                    ));
                 }
-            }
+            },
             other => return Err(error(&format!("unknown field `{other}`"))),
         }
     }
@@ -206,6 +252,12 @@ pub fn parse(text: &str, id: u64) -> Result<Option<ProduceRequest>, String> {
                 schema_id,
                 json: serde_json::from_str(value)
                     .map_err(|e| format!("the value is not valid JSON for Avro: {e}"))?,
+            },
+            ValueFormat::Protobuf { schema_id, message } => Payload::Protobuf {
+                schema_id,
+                message,
+                json: serde_json::from_str(value)
+                    .map_err(|e| format!("the value is not valid JSON for Protobuf: {e}"))?,
             },
         })
     };
@@ -285,6 +337,7 @@ mod tests {
             value_decoded: Some(kaffy_schema::Decoded {
                 schema_id: 7,
                 schema_type: Some(kaffy_schema::SchemaType::Avro),
+                message: None,
                 result: Ok(serde_json::json!({"sensor": "s1"})),
             }),
             ..Default::default()
@@ -297,6 +350,48 @@ mod tests {
                 json: serde_json::json!({"sensor": "s1"})
             })
         );
+    }
+
+    #[test]
+    fn protobuf_records_reencode_as_protobuf() {
+        let decoded = |schema_id| kaffy_schema::Decoded {
+            schema_id,
+            schema_type: Some(kaffy_schema::SchemaType::Protobuf),
+            message: Some("acme.Order".into()),
+            result: Ok(serde_json::json!({"order_id": "o-1"})),
+        };
+        let record = |schema_id| Record {
+            topic: "orders".into(),
+            value: Some(vec![0, 1]),
+            value_decoded: Some(decoded(schema_id)),
+            ..Default::default()
+        };
+        let text = from_record(&record(12));
+        assert!(
+            text.contains("value-format: protobuf 12 acme.Order"),
+            "{text}"
+        );
+        assert_eq!(
+            parse(&text, 1).unwrap().unwrap().value,
+            Some(Payload::Protobuf {
+                schema_id: Some(12),
+                message: "acme.Order".into(),
+                json: serde_json::json!({"order_id": "o-1"}),
+            })
+        );
+        let local = from_record(&record(0));
+        assert!(
+            local.contains("value-format: protobuf local acme.Order"),
+            "{local}"
+        );
+        assert!(matches!(
+            parse(&local, 1).unwrap().unwrap().value,
+            Some(Payload::Protobuf {
+                schema_id: None,
+                ..
+            })
+        ));
+        assert!(parse("topic: t\nvalue-format: protobuf x acme.A\n---\n{}", 1).is_err());
     }
 
     #[test]

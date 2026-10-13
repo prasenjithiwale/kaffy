@@ -71,6 +71,27 @@ pub struct Profile {
     /// Raw librdkafka properties, applied last so they can override anything above.
     #[serde(default)]
     pub librdkafka: BTreeMap<String, String>,
+    /// Topics whose messages are plain Protobuf (no Schema Registry), with the
+    /// `.proto` files to decode them with.
+    #[serde(default)]
+    pub protobuf: Vec<ProtobufTopic>,
+}
+
+/// How to decode one topic's Protobuf messages from local `.proto` files.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProtobufTopic {
+    pub topic: String,
+    /// `.proto` files to compile; relative paths are resolved against the
+    /// config file's directory.
+    pub files: Vec<PathBuf>,
+    /// Directories to look for imports in.
+    #[serde(default)]
+    pub include: Vec<PathBuf>,
+    /// Full name of the value message, e.g. `acme.Order`.
+    pub value: Option<String>,
+    /// Full name of the key message, if keys are Protobuf too.
+    pub key: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -174,10 +195,20 @@ impl Config {
             path: path.to_owned(),
             source,
         })?;
-        let config = Self::from_toml_str(&text).map_err(|source| ConfigError::Parse {
+        let mut config = Self::from_toml_str(&text).map_err(|source| ConfigError::Parse {
             path: path.to_owned(),
             source,
         })?;
+        let base = path.parent().unwrap_or(Path::new("."));
+        for profile in config.profiles.values_mut() {
+            for mapping in &mut profile.protobuf {
+                for p in mapping.files.iter_mut().chain(mapping.include.iter_mut()) {
+                    if p.is_relative() {
+                        *p = base.join(&*p);
+                    }
+                }
+            }
+        }
         for profile in config.profiles.values() {
             profile.validate()?;
         }
@@ -217,6 +248,7 @@ impl Profile {
             prod: false,
             schema_registry: None,
             librdkafka: BTreeMap::new(),
+            protobuf: Vec::new(),
         }
     }
 
@@ -234,6 +266,14 @@ impl Profile {
                 return Err(invalid("[sasl] is set but security_protocol is not sasl_*"));
             }
             _ => {}
+        }
+        for mapping in &self.protobuf {
+            if mapping.files.is_empty() || (mapping.value.is_none() && mapping.key.is_none()) {
+                return Err(invalid(&format!(
+                    "protobuf mapping for topic {} needs files and a value or key message",
+                    mapping.topic
+                )));
+            }
         }
         if self.tls.is_some() && !self.security_protocol.uses_tls() {
             return Err(invalid(
@@ -412,6 +452,39 @@ security_protocol = "sasl_plaintext"
             profile.validate().unwrap();
         }
         assert_eq!(config.profile(None).unwrap().name, "local");
+    }
+
+    #[test]
+    fn protobuf_paths_are_relative_to_the_config_file() {
+        let dir = std::env::temp_dir().join(format!("kaffy-config-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[profiles.local]
+bootstrap_servers = "localhost:9092"
+
+[[profiles.local.protobuf]]
+topic = "orders"
+files = ["proto/orders.proto", "/abs/other.proto"]
+include = ["proto"]
+value = "acme.Order"
+"#,
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+        let mapping = &config.profile(None).unwrap().protobuf[0];
+        assert_eq!(mapping.files[0], dir.join("proto/orders.proto"));
+        assert_eq!(mapping.files[1], PathBuf::from("/abs/other.proto"));
+        assert_eq!(mapping.include[0], dir.join("proto"));
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        let missing_message = Config::from_toml_str(
+            "[profiles.x]\nbootstrap_servers = \"b\"\n[[profiles.x.protobuf]]\ntopic = \"t\"\nfiles = [\"a.proto\"]\n",
+        )
+        .unwrap();
+        assert!(missing_message.profile(None).unwrap().validate().is_err());
     }
 
     #[test]

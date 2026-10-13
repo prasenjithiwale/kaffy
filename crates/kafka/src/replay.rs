@@ -4,12 +4,10 @@
 //! the produce time, so retention doesn't delete them straight away.
 
 use std::collections::{BTreeSet, HashMap};
-use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
-use kaffy_schema::Registry;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer, StreamConsumer};
 use rdkafka::error::KafkaError;
@@ -18,7 +16,8 @@ use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::{Offset, TopicPartitionList};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::client::{decode_record, to_record};
+use crate::client::to_record;
+use crate::decoders::Decoders;
 use crate::groups::{EARLIEST, LATEST, query_offsets};
 use crate::{Event, PartitionRange, RecordFilter, ReplayEnd, ReplayPlan, ReplayProgress, StartAt};
 
@@ -122,7 +121,7 @@ pub(crate) struct Job {
     /// Consumer settings for reading the source.
     pub config: ClientConfig,
     pub producer: FutureProducer,
-    pub registry: Option<Arc<Registry>>,
+    pub decoders: Decoders,
     pub id: u64,
     pub plan: ReplayPlan,
     pub filter: Option<RecordFilter>,
@@ -151,7 +150,7 @@ async fn copy(
     let Job {
         mut config,
         producer,
-        registry,
+        decoders,
         plan,
         filter,
         ..
@@ -205,9 +204,7 @@ async fn copy(
                     }
                     if let Some(filter) = &filter {
                         // The filter sees what the UI shows, so decode first.
-                        if let Some(registry) = &registry {
-                            decode_record(registry, &mut record).await;
-                        }
+                        decoders.decode(&mut record).await;
                         if !filter.matches(&record) {
                             continue;
                         }
