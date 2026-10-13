@@ -8,43 +8,37 @@ Last updated: 2026-10-13. Plan and feature list: [kafka-tui-feasibility.md](kafk
 |---|---|---|
 | 1. MVP: profiles, topics, live tail, seek, filters, JSON/Avro, detail, clipboard | done | v0.1.0 |
 | 2. Operations: consumer groups and lag, offset reset, replay, produce, edit & re-produce, export | done | v0.2.0 |
-| 3. Schema & admin: Schema Registry browser/diff/register, Protobuf, topic create/delete/config, DeleteRecords, tombstones | done, on `main` | **not yet: next task is releasing v0.3.0** |
-| 4. Polish: themes, keybindings, command palette, broker health, MSK IAM / Confluent Cloud auth | not started | |
+| 3. Schema & admin: Schema Registry browser/diff/register, Protobuf, topic create/delete/config, DeleteRecords, tombstones | done | v0.3.0 |
+| 4. Polish: themes, keybindings, command palette, broker health, MSK IAM / Confluent Cloud auth | in progress: broker health view done | |
 
-`main` is green in CI (commit `c980d0e`). The workspace version is still `0.2.0`.
+v0.3.0 was released on 2026-10-13. The workspace version is `0.3.0`.
 
-## Next task: release v0.3.0
+## Releasing
 
-The release pipeline is automated; a version tag triggers it. Steps:
+The release pipeline is automated; a version tag triggers it. Steps (as done for v0.3.0):
 
-1. **Bump the version** in the root `Cargo.toml` (`[workspace.package] version = "0.3.0"`), then run
+1. **Bump the version** in the root `Cargo.toml` (`[workspace.package] version`), then run
    `cargo build` so `Cargo.lock` updates. `release.yml` refuses a tag that doesn't match this version.
 2. **Refresh the website screenshots.** `crates/ui/examples/snapshot.rs` renders real screens from the
-   demo cluster as HTML. Extend it with Phase 3 screens: the schemas tab (`Action::ShowSchemas`, then
-   `Open` on `sensor-readings-value`, `ToggleDiff` to show v1 → v2), and a topic's config screen
-   (`Action::ShowConfig` on `orders`, which has a `retention.ms` override). The demo has a small
-   registry and topic configs, so both work without a broker. Run
-   `cargo run -p kaffy-ui --example snapshot > <scratch>/screens.html`.
+   demo cluster as HTML: `cargo run -p kaffy-ui --example snapshot > <scratch>/screens.html`. Add
+   new screens to it as features land (the brokers screen is already in it, not yet on the site).
 3. **Update the kaffy page on the folio site** (`~/Projects/folio`, public repo
    `prasenjithiwale/folio`, served at https://prasenjithiwale.github.io/folio/kaffy/):
-   - Add tabs for the new screens to the `<figure class="terminal">` viewer in `kaffy/index.html`.
-     Each tab is a `<button role="tab">` plus a `<div role="tabpanel">` containing the `<pre class="tui">`
-     from the snapshot and a one-line caption. Keep ids unique and only the first panel visible.
-   - Add Phase 3 to the copy: the schemas tab (browse, diff, compatibility check, register), Protobuf
-     (registry and local `.proto` files), topic admin (create/delete/config), delete records, tombstones.
-     Update the keys table (`3` schemas, `c` `n` `D` `T` on topics, `K` tombstone).
-   - Update the project blurb on `index.html` (home page) if it lists features.
+   - Tabs in the `<figure class="terminal">` viewer in `kaffy/index.html` are a `<button role="tab">`
+     plus a `<div role="tabpanel">` with the `<pre class="tui">` from the snapshot and a caption. Keep
+     ids unique and only the first panel visible. Refresh every panel, since the header changes.
+   - Update the copy, the keys table and the home page blurb (`index.html`).
    - Commit and push folio **before** tagging, so the site describes the release it serves.
 4. **Commit and push kaffy**, wait for CI to pass, then tag:
-   `git tag -a v0.3.0 -m "kaffy v0.3.0: ..." && git push origin v0.3.0`.
+   `git tag -a vX.Y.Z -m "kaffy vX.Y.Z: ..." && git push origin vX.Y.Z`.
 5. **Watch the Release workflow** (`gh run list --repo prasenjithiwale/kaffy`). Its jobs are:
    1. **build:** checks the version, builds on ubuntu-22.04, packages, and fails if the binary links libcurl.
-   2. **publish:** commits `kaffy/releases/v0.3.0/*`, `latest.txt` and `latest.json` into folio through
+   2. **publish:** commits `kaffy/releases/vX.Y.Z/*`, `latest.txt` and `latest.json` into folio through
       the `FOLIO_DEPLOY_KEY` deploy key.
    3. **smoke-test:** waits for GitHub Pages, then runs the documented
       `curl -fsSL https://prasenjithiwale.github.io/folio/kaffy/install.sh | sh` on Ubuntu 22.04 and
       Debian 12 and checks `kaffy --version`.
-6. **Verify:** `curl -s https://prasenjithiwale.github.io/folio/kaffy/releases/latest.txt` shows `v0.3.0`,
+6. **Verify:** `curl -s https://prasenjithiwale.github.io/folio/kaffy/releases/latest.txt` shows the tag,
    then `git pull` in `~/Projects/folio` to pick up the release commit.
 
 Before pushing any Rust change, run CI's exact clippy (see *Toolchains* below); CI uses a newer Rust
@@ -88,8 +82,8 @@ than Homebrew's and has failed on new lints before.
 ## Testing
 
 ```sh
-cargo test --workspace                                           # unit + render tests (77)
-cargo test -p kaffy-kafka --test local_broker -- --ignored       # Homebrew broker on 9092 (5 tests)
+cargo test --workspace                                           # unit + render tests (82)
+cargo test -p kaffy-kafka --test local_broker -- --ignored       # Homebrew broker on 9092 (6 tests)
 docker compose -f dev/docker-compose.yml up -d --wait
 cargo test -p kaffy-schema --test real_registry -- --ignored     # real Schema Registry (1 test)
 cargo test -p kaffy-kafka --test schema_registry -- --ignored    # Kafka 29092 + registry: Protobuf (2 tests)
@@ -119,12 +113,16 @@ through a worker-produced plan, then a preview dialog, then confirmation (`y`, o
 `prod = true` profiles; always typed for topic deletion and DeleteRecords). Read-only profiles are refused
 in both the UI and the worker.
 
-## Phase 4 (after the release)
+## Next task: Phase 4
 
-From the roadmap: light/dark themes and configurable keybindings; a command palette with fuzzy search;
-a broker health view (brokers, controller, under-replicated partitions); MSK IAM and Confluent Cloud
-authentication; static binaries and Homebrew / cargo-install distribution. Consider macOS and arm64
-builds too, since the site only offers Linux x86_64 today.
+Done: **broker health view** (`4`): cluster id, reported controller, per-broker leaders/replicas/out-of-sync,
+offline and under-replicated partitions, brokers missing from metadata. On KRaft the "controller" clients
+see is a forwarding broker, not the active quorum controller; the screen says so.
+
+Remaining, from the roadmap: light/dark themes and configurable keybindings; a command palette with fuzzy
+search; MSK IAM and Confluent Cloud authentication; static binaries and Homebrew / cargo-install
+distribution. Consider macOS and arm64 builds too, since the site only offers Linux x86_64 today.
+Release as v0.4.0 when Phase 4 is done (or earlier if the user asks), adding the brokers screen to the site.
 
 ## Working agreements with the user
 

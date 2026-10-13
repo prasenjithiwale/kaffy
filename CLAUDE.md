@@ -5,15 +5,9 @@ usage and `docs/STATUS.md` for the full project state, environment notes and rel
 
 ## Start here
 
-**Next task: release v0.3.0** (Phase 3: Schema Registry browser, Protobuf, topic admin, DeleteRecords).
-Follow "Next task: release v0.3.0" in `docs/STATUS.md`:
-1. Bump the version.
-2. Add Phase 3 screens to the website snapshot.
-3. Update the kaffy page in `~/Projects/folio` and push it.
-4. Push kaffy, wait for green CI, then tag `v0.3.0`.
-5. Watch the release workflow through to its install smoke test.
-
-Then Phase 4 (see the roadmap in `docs/kafka-tui-feasibility.md`).
+**Next task: Phase 4** (v0.3.0 is released). The broker health view is done; see "Next task: Phase 4"
+in `docs/STATUS.md` for what remains (themes, keybindings, command palette, MSK IAM / Confluent Cloud
+auth, distribution). Releases follow "Releasing" in the same file.
 
 ## Rules that bit before
 
