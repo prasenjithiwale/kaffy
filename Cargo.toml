@@ -38,7 +38,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 lto = "thin"
 strip = true
 
-# Dependencies (librdkafka, OpenSSL, ...) are rarely debugged; skipping their
-# debug info keeps target/ several GB smaller.
+# Full debug info makes target/ grow by gigabytes on this workspace. Line
+# tables keep panic backtraces readable; dependencies get none.
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.dev.package."*"]
 debug = false

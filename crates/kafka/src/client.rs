@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -7,14 +7,18 @@ use kaffy_schema::Registry;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer, StreamConsumer};
 use rdkafka::error::{KafkaError, KafkaResult};
-use rdkafka::message::{BorrowedMessage, Headers, Message};
+use rdkafka::message::{BorrowedMessage, Headers, Message, OwnedHeaders};
+use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::types::RDKafkaErrorCode;
 use rdkafka::{Offset, TopicPartitionList};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
+use crate::groups::Groups;
+use crate::replay;
 use crate::{
-    Command, EVENT_BUFFER, Error, Event, Header, PartitionInfo, Record, StartAt, TopicInfo, Worker,
+    Command, EVENT_BUFFER, Error, Event, Header, Operation, PartitionInfo, Payload, ProduceRequest,
+    Record, StartAt, TopicInfo, Worker,
 };
 
 const METADATA_TIMEOUT: Duration = Duration::from_secs(10);
@@ -39,7 +43,16 @@ pub fn spawn(profile: &Profile) -> Result<Worker, Error> {
 
     let (command_tx, command_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::channel(EVENT_BUFFER);
-    tokio::spawn(run(base, metadata, registry, command_rx, event_tx));
+    let ctx = Context {
+        groups: Arc::new(Groups::new(base.clone(), metadata.clone())),
+        base,
+        metadata,
+        registry,
+        producer: Arc::new(OnceLock::new()),
+        read_only: profile.read_only,
+        events: event_tx,
+    };
+    tokio::spawn(run(ctx, command_rx));
     Ok(Worker {
         commands: command_tx,
         events: event_rx,
@@ -58,24 +71,96 @@ fn viewer_config(base: &ClientConfig) -> ClientConfig {
     config
 }
 
+/// Producer settings shared by produce and replay.
+fn producer_config(base: &ClientConfig) -> ClientConfig {
+    let mut config = base.clone();
+    config
+        // Same key-to-partition mapping as the Java client, so keyed records land
+        // where Java producers would put them.
+        .set("partitioner", "murmur2_random")
+        // Keeps per-partition order on retries without needing idempotence ACLs.
+        .set("max.in.flight.requests.per.connection", "1")
+        .set("linger.ms", "5");
+    config
+}
+
 struct Tail {
     control: mpsc::UnboundedSender<Command>,
     task: JoinHandle<()>,
 }
 
-async fn run(
+#[derive(Clone)]
+struct Context {
     base: ClientConfig,
     metadata: Arc<BaseConsumer>,
+    groups: Arc<Groups>,
     registry: Option<Arc<Registry>>,
-    mut commands: mpsc::UnboundedReceiver<Command>,
+    /// Created on the first write, so read-only sessions never open one.
+    producer: Arc<OnceLock<FutureProducer>>,
+    read_only: bool,
     events: mpsc::Sender<Event>,
-) {
+}
+
+impl Context {
+    fn producer(&self) -> Result<FutureProducer, String> {
+        if let Some(producer) = self.producer.get() {
+            return Ok(producer.clone());
+        }
+        let producer: FutureProducer = producer_config(&self.base)
+            .create()
+            .map_err(|e| format!("creating producer: {e}"))?;
+        Ok(self.producer.get_or_init(|| producer).clone())
+    }
+
+    /// Runs blocking `work` off the async threads and reports its result.
+    fn blocking<T: Send + 'static>(
+        &self,
+        operation: Operation,
+        work: impl FnOnce() -> Result<T, String> + Send + 'static,
+        to_event: impl FnOnce(T) -> Event + Send + 'static,
+    ) {
+        let events = self.events.clone();
+        tokio::spawn(async move {
+            let event = match tokio::task::spawn_blocking(work).await {
+                Ok(Ok(value)) => to_event(value),
+                Ok(Err(message)) => Event::Failed { operation, message },
+                Err(e) => Event::Failed {
+                    operation,
+                    message: format!("internal error: {e}"),
+                },
+            };
+            let _ = events.send(event).await;
+        });
+    }
+
+    /// Writes are refused here as well as in the UI.
+    fn refuse_if_read_only(&self, operation: Operation) -> bool {
+        if self.read_only {
+            let events = self.events.clone();
+            tokio::spawn(async move {
+                let _ = events
+                    .send(Event::Failed {
+                        operation,
+                        message: READ_ONLY.to_owned(),
+                    })
+                    .await;
+            });
+        }
+        self.read_only
+    }
+}
+
+const READ_ONLY: &str =
+    "this profile is read-only; set read_only = false in its config to allow changes";
+
+async fn run(ctx: Context, mut commands: mpsc::UnboundedReceiver<Command>) {
     let mut tail: Option<Tail> = None;
+    let mut replay: Option<(oneshot::Sender<()>, JoinHandle<()>)> = None;
     while let Some(command) = commands.recv().await {
         match command {
             Command::ListTopics => {
-                let metadata = metadata.clone();
-                let events = events.clone();
+                let metadata = ctx.metadata.clone();
+                let events = ctx.events.clone();
                 tokio::spawn(async move {
                     let event = match tokio::task::spawn_blocking(move || fetch_topics(&metadata))
                         .await
@@ -97,13 +182,13 @@ async fn run(
                 }
                 let (control, control_rx) = mpsc::unbounded_channel();
                 let task = tokio::spawn(run_tail(
-                    viewer_config(&base),
-                    registry.clone(),
+                    viewer_config(&ctx.base),
+                    ctx.registry.clone(),
                     session,
                     topic,
                     start,
                     control_rx,
-                    events.clone(),
+                    ctx.events.clone(),
                 ));
                 tail = Some(Tail { control, task });
             }
@@ -117,7 +202,193 @@ async fn run(
                     let _ = tail.control.send(command);
                 }
             }
+            Command::ListGroups => {
+                let groups = ctx.groups.clone();
+                ctx.blocking(
+                    Operation::ListGroups,
+                    move || groups.list().map_err(|e| e.to_string()),
+                    Event::Groups,
+                );
+            }
+            Command::DescribeGroup(name) => {
+                let groups = ctx.groups.clone();
+                ctx.blocking(
+                    Operation::DescribeGroup,
+                    move || groups.describe(&name).map_err(|e| e.to_string()),
+                    Event::GroupDetail,
+                );
+            }
+            Command::PlanReset {
+                group,
+                topic,
+                target,
+            } => {
+                let groups = ctx.groups.clone();
+                ctx.blocking(
+                    Operation::PlanReset,
+                    move || groups.plan_reset(&group, topic.as_deref(), target),
+                    Event::ResetPlan,
+                );
+            }
+            Command::ApplyReset { group, offsets } => {
+                if ctx.refuse_if_read_only(Operation::ApplyReset) {
+                    continue;
+                }
+                let groups = ctx.groups.clone();
+                ctx.blocking(
+                    Operation::ApplyReset,
+                    move || {
+                        let partitions = groups.apply_reset(&group, &offsets)?;
+                        Ok((group, partitions))
+                    },
+                    |(group, partitions)| Event::ResetApplied { group, partitions },
+                );
+            }
+            Command::Produce(request) => {
+                if ctx.refuse_if_read_only(Operation::Produce) {
+                    continue;
+                }
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    let id = request.id;
+                    let topic = request.topic.clone();
+                    let event = match produce(&ctx, request).await {
+                        Ok((partition, offset)) => Event::Produced {
+                            id,
+                            topic,
+                            partition,
+                            offset,
+                        },
+                        Err(message) => Event::Failed {
+                            operation: Operation::Produce,
+                            message,
+                        },
+                    };
+                    let _ = ctx.events.send(event).await;
+                });
+            }
+            Command::PlanReplay {
+                source,
+                target,
+                start,
+                end,
+            } => {
+                let metadata = ctx.metadata.clone();
+                ctx.blocking(
+                    Operation::PlanReplay,
+                    move || replay::plan(&metadata, &source, &target, start, end),
+                    Event::ReplayPlan,
+                );
+            }
+            Command::Replay { id, plan, filter } => {
+                if ctx.refuse_if_read_only(Operation::Replay) {
+                    continue;
+                }
+                if replay.as_ref().is_some_and(|(_, task)| !task.is_finished()) {
+                    let _ = ctx
+                        .events
+                        .send(Event::Failed {
+                            operation: Operation::Replay,
+                            message: "a replay is already running".to_owned(),
+                        })
+                        .await;
+                    continue;
+                }
+                let producer = match ctx.producer() {
+                    Ok(producer) => producer,
+                    Err(message) => {
+                        let _ = ctx
+                            .events
+                            .send(Event::Failed {
+                                operation: Operation::Replay,
+                                message,
+                            })
+                            .await;
+                        continue;
+                    }
+                };
+                let (cancel_tx, cancel_rx) = oneshot::channel();
+                let job = replay::Job {
+                    config: viewer_config(&ctx.base),
+                    producer,
+                    registry: ctx.registry.clone(),
+                    id,
+                    plan,
+                    filter,
+                };
+                let task = tokio::spawn(replay::run(job, cancel_rx, ctx.events.clone()));
+                replay = Some((cancel_tx, task));
+            }
+            Command::CancelReplay => {
+                if let Some((cancel, _)) = replay.take() {
+                    let _ = cancel.send(());
+                }
+            }
         }
+    }
+}
+
+async fn produce(ctx: &Context, request: ProduceRequest) -> Result<(i32, i64), String> {
+    // Check the topic first: the broker may otherwise auto-create a mistyped one.
+    let partitions = {
+        let metadata = ctx.metadata.clone();
+        let topic = request.topic.clone();
+        tokio::task::spawn_blocking(move || topic_partition_count(&metadata, &topic))
+            .await
+            .map_err(|e| e.to_string())??
+    };
+    if let Some(p) = request.partition {
+        if p < 0 || p as usize >= partitions {
+            return Err(format!(
+                "topic {} has partitions 0 to {}; there is no partition {p}",
+                request.topic,
+                partitions - 1
+            ));
+        }
+    }
+    let value = match request.value {
+        None => None,
+        Some(Payload::Bytes(bytes)) => Some(bytes),
+        Some(Payload::Avro { schema_id, json }) => {
+            let registry = ctx
+                .registry
+                .as_ref()
+                .ok_or("this profile has no Schema Registry to encode Avro with")?;
+            Some(registry.encode_avro(schema_id, &json).await?)
+        }
+    };
+    let mut headers = OwnedHeaders::new_with_capacity(request.headers.len());
+    for h in &request.headers {
+        headers = headers.insert(rdkafka::message::Header {
+            key: &h.key,
+            value: h.value.as_deref(),
+        });
+    }
+    let mut record = FutureRecord::<[u8], [u8]>::to(&request.topic).headers(headers);
+    if let Some(key) = request.key.as_deref() {
+        record = record.key(key);
+    }
+    if let Some(value) = value.as_deref() {
+        record = record.payload(value);
+    }
+    if let Some(partition) = request.partition {
+        record = record.partition(partition);
+    }
+    let delivery = ctx
+        .producer()?
+        .send(record, Duration::from_secs(30))
+        .await
+        .map_err(|(e, _)| format!("producing to {}: {e}", request.topic))?;
+    Ok((delivery.partition, delivery.offset))
+}
+
+fn topic_partition_count(admin: &BaseConsumer, topic: &str) -> Result<usize, String> {
+    let metadata = admin
+        .fetch_metadata(Some(topic), METADATA_TIMEOUT)
+        .map_err(|e| format!("{topic}: {e}"))?;
+    match metadata.topics().first() {
+        Some(t) if t.error().is_none() && !t.partitions().is_empty() => Ok(t.partitions().len()),
+        _ => Err(format!("topic {topic} does not exist")),
     }
 }
 
@@ -196,8 +467,7 @@ async fn tail(
                     let mut record = to_record(&message);
                     drop(message);
                     if let Some(registry) = &registry {
-                        record.key_decoded = decode(registry, record.key.as_deref()).await;
-                        record.value_decoded = decode(registry, record.value.as_deref()).await;
+                        decode_record(registry, &mut record).await;
                     }
                     let event = Event::Record {
                         session,
@@ -268,7 +538,13 @@ async fn decode(registry: &Registry, bytes: Option<&[u8]>) -> Option<kaffy_schem
     registry.decode(bytes?).await
 }
 
-fn to_record(message: &BorrowedMessage<'_>) -> Record {
+/// Fills in the decoded key and value of a Schema Registry payload.
+pub(crate) async fn decode_record(registry: &Registry, record: &mut Record) {
+    record.key_decoded = decode(registry, record.key.as_deref()).await;
+    record.value_decoded = decode(registry, record.value.as_deref()).await;
+}
+
+pub(crate) fn to_record(message: &BorrowedMessage<'_>) -> Record {
     Record {
         topic: message.topic().to_owned(),
         partition: message.partition(),

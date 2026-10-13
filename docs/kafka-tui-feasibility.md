@@ -137,12 +137,12 @@ Estimates are rough, for one developer working part-time.
 - [x] Copy key/value to clipboard
 
 ### Phase 2: Operations (~4 weeks)
-- [ ] Consumer groups list
-- [ ] Lag per partition and total, refreshed periodically, with sparkline
-- [ ] Offset reset wizard (earliest / latest / timestamp / specific)
-- [ ] Replay a range to the same or another topic
-- [ ] Produce a message; "edit and re-produce"
-- [ ] Export to JSON / NDJSON / CSV
+- [x] Consumer groups list
+- [x] Lag per partition and total, refreshed periodically, with sparkline
+- [x] Offset reset wizard (earliest / latest / timestamp / specific)
+- [x] Replay a range to the same or another topic
+- [x] Produce a message; "edit and re-produce"
+- [x] Export to JSON / NDJSON / CSV
 
 ### Phase 3: Schema & Admin (~4 weeks)
 - [ ] Schema Registry: subjects, versions, diff

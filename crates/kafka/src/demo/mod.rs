@@ -14,8 +14,11 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::{
-    Command, EVENT_BUFFER, Event, Header, PartitionInfo, Record, StartAt, TopicInfo, Worker,
+    Command, EVENT_BUFFER, Event, Header, Operation, PartitionInfo, Record, StartAt, TopicInfo,
+    Worker,
 };
+
+mod ops;
 
 const PARTITIONS: i32 = 3;
 /// Messages already in each partition when the demo starts.
@@ -44,8 +47,14 @@ pub fn spawn_demo() -> Worker {
 
 async fn run(mut commands: mpsc::UnboundedReceiver<Command>, events: mpsc::Sender<Event>) {
     let started_ms = now_ms();
+    let cluster = ops::Cluster::new(started_ms);
     let mut tail: Option<(mpsc::UnboundedSender<Command>, JoinHandle<()>)> = None;
+    // Session and topic of the running tail, to show produced records in it.
+    let mut tailing: Option<(u64, String)> = None;
+    let mut replay: Option<(tokio::sync::oneshot::Sender<()>, JoinHandle<()>)> = None;
+    let failed = |operation, message| Event::Failed { operation, message };
     while let Some(command) = commands.recv().await {
+        let lock = || cluster.lock().expect("demo cluster");
         match command {
             Command::ListTopics => {
                 let _ = events
@@ -69,6 +78,7 @@ async fn run(mut commands: mpsc::UnboundedReceiver<Command>, events: mpsc::Sende
                         .await;
                     continue;
                 };
+                tailing = Some((session, topic.clone()));
                 let (control, control_rx) = mpsc::unbounded_channel();
                 let task = tokio::spawn(run_tail(
                     topic_idx,
@@ -81,6 +91,7 @@ async fn run(mut commands: mpsc::UnboundedReceiver<Command>, events: mpsc::Sende
                 tail = Some((control, task));
             }
             Command::StopTail => {
+                tailing = None;
                 if let Some((_, task)) = tail.take() {
                     task.abort();
                 }
@@ -88,6 +99,95 @@ async fn run(mut commands: mpsc::UnboundedReceiver<Command>, events: mpsc::Sende
             Command::Pause | Command::Resume => {
                 if let Some((control, _)) = &tail {
                     let _ = control.send(command);
+                }
+            }
+            Command::ListGroups => {
+                let groups = lock().list();
+                let _ = events.send(Event::Groups(groups)).await;
+            }
+            Command::DescribeGroup(name) => {
+                let event = match lock().describe(&name) {
+                    Ok(detail) => Event::GroupDetail(detail),
+                    Err(e) => failed(Operation::DescribeGroup, e),
+                };
+                let _ = events.send(event).await;
+            }
+            Command::PlanReset {
+                group,
+                topic,
+                target,
+            } => {
+                let event = match lock().plan_reset(&group, topic.as_deref(), target) {
+                    Ok(plan) => Event::ResetPlan(plan),
+                    Err(e) => failed(Operation::PlanReset, e),
+                };
+                let _ = events.send(event).await;
+            }
+            Command::ApplyReset { group, offsets } => {
+                let event = match lock().apply_reset(&group, &offsets) {
+                    Ok(partitions) => Event::ResetApplied { group, partitions },
+                    Err(e) => failed(Operation::ApplyReset, e),
+                };
+                let _ = events.send(event).await;
+            }
+            Command::Produce(request) => {
+                let result = lock().produce(&request);
+                match result {
+                    Ok(record) => {
+                        let produced = Event::Produced {
+                            id: request.id,
+                            topic: record.topic.clone(),
+                            partition: record.partition,
+                            offset: record.offset,
+                        };
+                        let _ = events.send(produced).await;
+                        if let Some((session, topic)) = &tailing {
+                            if *topic == record.topic {
+                                let shown = Event::Record {
+                                    session: *session,
+                                    record: Box::new(record),
+                                };
+                                let _ = events.send(shown).await;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let _ = events.send(failed(Operation::Produce, e)).await;
+                    }
+                }
+            }
+            Command::PlanReplay {
+                source,
+                target,
+                start,
+                end,
+            } => {
+                let event = match lock().plan_replay(&source, &target, start, end) {
+                    Ok(plan) => Event::ReplayPlan(plan),
+                    Err(e) => failed(Operation::PlanReplay, e),
+                };
+                let _ = events.send(event).await;
+            }
+            Command::Replay { id, plan, filter } => {
+                if replay.as_ref().is_some_and(|(_, task)| !task.is_finished()) {
+                    let event = failed(Operation::Replay, "a replay is already running".to_owned());
+                    let _ = events.send(event).await;
+                    continue;
+                }
+                let (cancel, cancel_rx) = tokio::sync::oneshot::channel();
+                let task = tokio::spawn(ops::replay(
+                    cluster.clone(),
+                    id,
+                    plan,
+                    filter,
+                    cancel_rx,
+                    events.clone(),
+                ));
+                replay = Some((cancel, task));
+            }
+            Command::CancelReplay => {
+                if let Some((cancel, _)) = replay.take() {
+                    let _ = cancel.send(());
                 }
             }
         }

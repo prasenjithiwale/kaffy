@@ -42,12 +42,16 @@ Without a registry, such payloads are shown as a hex dump labelled with their sc
 
 ## Keys
 
+Press `?` on any screen for its keys. `1` and `2` switch between topics and consumer groups.
+
 | Screen | Keys |
 |---|---|
-| everywhere | `↑↓`/`jk` move, `PgUp`/`PgDn`/`Ctrl-u`/`Ctrl-d` page, `g`/`G` top/bottom, `esc` back (clears an active filter first), `q`/`Ctrl-c` quit |
+| everywhere | `↑↓`/`jk` move, `PgUp`/`PgDn`/`Ctrl-u`/`Ctrl-d` page, `g`/`G` top/bottom, `esc` back (clears an active filter first), `?` help, `q`/`Ctrl-c` quit |
 | topics | `⏎` open, `/` filter, `r` refresh |
-| messages | `⏎` detail, `space` pause/resume, `/` filter (see below), `b` from beginning, `e` from end, `o` seek to offset, `t` seek to time (`-15m`, `2026-10-13 09:30`, RFC 3339, epoch ms), `r` reload, `y`/`Y` copy value/key |
-| detail | `↑↓` scroll, `y`/`Y` copy value/key |
+| messages | `⏎` detail, `space` pause/resume, `/` filter (see below), `b` from beginning, `e` from end, `o` seek to offset, `t` seek to time (`-15m`, `2026-10-13 09:30`, RFC 3339, epoch ms), `r` reload, `y`/`Y` copy value/key, `p` produce, `E` edit & produce, `X` replay, `x` export |
+| detail | `↑↓` scroll, `y`/`Y` copy value/key, `E` edit & produce |
+| groups | `⏎` open, `R` reset offsets, `/` filter, `r` refresh |
+| group detail | `R` reset offsets, `r` refresh |
 
 ### Message filter
 
@@ -69,13 +73,41 @@ so `~"status":"(PAID|SHIPPED)"` works as typed.
 Opening a topic reads the last 100 messages of each partition, then follows new ones. Up to 5,000 messages are kept in memory.
 The viewer assigns partitions directly and never commits offsets, so it does not join or disturb any consumer group.
 
+## Consumer groups
+
+The groups tab lists every consumer group with its state, members, topics and total lag, refreshed every
+5 seconds with a trend line. Opening a group shows lag per partition, its members and a lag chart.
+
+## Changing things
+
+Writes are disabled unless the profile has `read_only = false`, and the Kafka worker refuses them again
+independently of the UI. Every change shows a preview first and is sent only after you confirm with `y`;
+on profiles with `prod = true` you type the group or topic name instead.
+
+- **Reset offsets** (`R` on a group): earliest, latest, a time, or an offset, for all of the group's topics
+  or one. The preview shows current and new offsets and how many messages will be reprocessed or skipped.
+  Kafka only accepts resets while the group has no active members; kaffy checks this again just before
+  committing and verifies the committed offsets afterwards.
+- **Produce** (`p`) opens `$VISUAL`/`$EDITOR` (default `vi`) with a template: topic, partition (or `auto`
+  to let the key decide, as Java producers do), key, headers and the value. **Edit & produce** (`E`) fills
+  the template from the selected message; Avro values are shown as JSON and encoded again with their schema.
+- **Replay** (`X`) copies a range (from: beginning, an offset or a time; until: now, an offset or a time) to
+  the same or another topic, keeping keys, values and headers. **The active filter applies**, so you can
+  replay just the messages you are looking at. Messages keep their partition when both topics have the
+  same partition count. Progress is shown while it runs; `c` cancels.
+- **Export** (`x`) writes the messages currently shown (after the filter) to JSON, NDJSON or CSV in the
+  working directory. Decoded Avro and JSON are written as JSON; binary payloads as base64. Export works on
+  read-only profiles, since it doesn't write to Kafka.
+
+`kaffy --demo` accepts all of these against its fake cluster, so you can try them safely.
+
 ## Layout
 
 ```
 crates/
 ├── app/     # `kaffy` binary: CLI, event loop, keymap, clipboard
-├── ui/      # AppState + reducer, ratatui views
-├── kafka/   # rdkafka worker (metadata, tail, seek) and the --demo fake cluster
+├── ui/      # AppState + reducer, dialogs, produce templates, export, ratatui views
+├── kafka/   # rdkafka worker (tail, seek, groups, resets, produce, replay) and the --demo fake cluster
 ├── schema/  # payload decoding (JSON / text / hex; Schema Registry later)
 └── config/  # cluster profiles → librdkafka properties
 ```

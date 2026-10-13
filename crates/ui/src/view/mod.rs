@@ -1,12 +1,15 @@
 mod detail;
+mod dialog;
+mod groups;
 mod messages;
 mod topics;
 
 use ratatui::Frame;
+use ratatui::layout::Flex;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Color;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Clear, Paragraph};
 
 use crate::state::{AppState, Connection, InputKind, Screen};
 use crate::theme;
@@ -24,8 +27,112 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
         Screen::Topics => topics::render(frame, body, state),
         Screen::Messages => messages::render(frame, body, state),
         Screen::Detail => detail::render(frame, body, state),
+        Screen::Groups => groups::render_list(frame, body, state),
+        Screen::GroupDetail => groups::render_detail(frame, body, state),
     }
     render_footer(frame, footer, state);
+    dialog::render(frame, state);
+    if state.show_help {
+        render_help(frame, state);
+    }
+}
+
+/// Keys of each screen: (key, what it does). The footer shows the first few.
+fn keys(screen: Screen) -> &'static [(&'static str, &'static str)] {
+    match screen {
+        Screen::Topics => &[
+            ("↑↓", "move"),
+            ("⏎", "open"),
+            ("/", "filter"),
+            ("2", "consumer groups"),
+            ("r", "refresh"),
+            ("?", "help"),
+            ("q", "quit"),
+        ],
+        Screen::Messages => &[
+            ("↑↓", "move"),
+            ("⏎", "detail"),
+            ("space", "pause"),
+            ("/", "filter"),
+            ("p", "produce"),
+            ("E", "edit & produce"),
+            ("X", "replay"),
+            ("x", "export"),
+            ("?", "help"),
+            ("esc", "back"),
+            ("b / e", "read from the beginning / only new messages"),
+            ("o / t", "jump to an offset / a time"),
+            ("y / Y", "copy value / key"),
+            ("r", "reload"),
+            ("g / G", "first message / follow newest"),
+        ],
+        Screen::Detail => &[
+            ("↑↓", "scroll"),
+            ("y / Y", "copy value / key"),
+            ("E", "edit & produce"),
+            ("p", "produce"),
+            ("?", "help"),
+            ("esc", "back"),
+        ],
+        Screen::Groups => &[
+            ("↑↓", "move"),
+            ("⏎", "open"),
+            ("R", "reset offsets"),
+            ("/", "filter"),
+            ("1", "topics"),
+            ("r", "refresh"),
+            ("?", "help"),
+            ("q", "quit"),
+        ],
+        Screen::GroupDetail => &[
+            ("↑↓", "move"),
+            ("R", "reset offsets"),
+            ("r", "refresh"),
+            ("?", "help"),
+            ("esc", "back"),
+        ],
+    }
+}
+
+fn render_help(frame: &mut Frame, state: &AppState) {
+    let keys = keys(state.screen);
+    let mut lines = vec![Line::raw("")];
+    lines.extend(keys.iter().map(|(key, label)| {
+        Line::from(vec![
+            Span::styled(format!("  {key:<8}"), theme::key_hint()),
+            Span::raw(*label),
+        ])
+    }));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled("  1 / 2   ", theme::key_hint()),
+        Span::raw("topics / consumer groups"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  ctrl-c  ", theme::key_hint()),
+        Span::raw("quit from anywhere"),
+    ]));
+    lines.push(Line::raw(""));
+    lines.push(Line::styled("  Press any key to close", theme::dim()));
+
+    let area = frame.area();
+    let width = (lines.iter().map(Line::width).max().unwrap_or(30) as u16 + 6).min(area.width);
+    let height = (lines.len() as u16 + 2).min(area.height);
+    let [popup] = Layout::vertical([Constraint::Length(height)])
+        .flex(Flex::Center)
+        .areas(area);
+    let [popup] = Layout::horizontal([Constraint::Length(width)])
+        .flex(Flex::Center)
+        .areas(popup);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::bordered()
+                .border_style(theme::label())
+                .title(Line::styled(" Keys ", theme::title())),
+        ),
+        popup,
+    );
 }
 
 fn render_header(frame: &mut Frame, area: Rect, state: &AppState) {
@@ -56,6 +163,25 @@ fn render_header(frame: &mut Frame, area: Rect, state: &AppState) {
             theme::ok(),
         ),
     });
+    let tabs = Line::from(vec![
+        tab(
+            "1",
+            "Topics",
+            matches!(
+                state.screen,
+                Screen::Topics | Screen::Messages | Screen::Detail
+            ),
+        ),
+        Span::raw("  "),
+        tab(
+            "2",
+            "Groups",
+            matches!(state.screen, Screen::Groups | Screen::GroupDetail),
+        ),
+        Span::raw(" "),
+    ])
+    .right_aligned();
+    frame.render_widget(tabs, area);
     if let Some(tail) = &state.tail {
         spans.push(Span::styled("  │  ", theme::dim()));
         spans.push(Span::styled("topic ", theme::dim()));
@@ -101,34 +227,17 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &AppState) {
         );
         return;
     }
-    let keys: &[(&str, &str)] = match state.screen {
-        Screen::Topics => &[
-            ("↑↓", "move"),
-            ("⏎", "open"),
-            ("/", "filter"),
-            ("r", "refresh"),
-            ("q", "quit"),
-        ],
-        Screen::Messages => &[
-            ("↑↓", "move"),
-            ("⏎", "detail"),
-            ("space", "pause"),
-            ("/", "filter"),
-            ("b/e", "beginning/end"),
-            ("o", "offset"),
-            ("t", "time"),
-            ("y/Y", "copy value/key"),
-            ("esc", "back"),
-        ],
-        Screen::Detail => &[
-            ("↑↓", "scroll"),
-            ("y", "copy value"),
-            ("Y", "copy key"),
-            ("esc", "back"),
-            ("q", "quit"),
-        ],
-    };
+    // The footer shows the common keys; ? lists them all.
+    let keys = &keys(state.screen)[..keys(state.screen).len().min(10)];
     frame.render_widget(Line::from(hints(keys)), area);
+}
+
+fn tab(key: &str, label: &str, active: bool) -> Span<'static> {
+    if active {
+        Span::styled(format!(" {key} {label} "), theme::selected())
+    } else {
+        Span::styled(format!(" {key} {label} "), theme::dim())
+    }
 }
 
 fn hints(keys: &[(&str, &str)]) -> Vec<Span<'static>> {

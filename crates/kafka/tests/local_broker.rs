@@ -214,3 +214,357 @@ async fn offset_seek_is_clamped_per_partition() {
     let positions: Vec<_> = records.iter().map(|r| (r.partition, r.offset)).collect();
     assert_eq!(positions, vec![(0, 2), (0, 3)]);
 }
+
+// ---- Phase 2: consumer groups, offset resets, produce, replay ----
+
+use kaffy_kafka::{
+    GroupState, Header, Operation, Payload, ProduceRequest, RecordFilter, ReplayEnd, ResetTarget,
+};
+use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer};
+use rdkafka::{Offset, TopicPartitionList};
+
+/// Waits for the first event `pick` accepts; fails on an unexpected `Failed`.
+async fn expect<T>(worker: &mut Worker, mut pick: impl FnMut(Event) -> Option<T>) -> T {
+    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    loop {
+        match tokio::time::timeout_at(deadline, worker.events.recv()).await {
+            Ok(Some(event)) => {
+                let failure = match &event {
+                    Event::Failed { operation, message } => {
+                        Some(format!("{operation:?}: {message}"))
+                    }
+                    _ => None,
+                };
+                if let Some(value) = pick(event) {
+                    return value;
+                }
+                if let Some(failure) = failure {
+                    panic!("unexpected failure: {failure}");
+                }
+            }
+            Ok(None) => panic!("worker stopped"),
+            Err(_) => panic!("timed out waiting for an event"),
+        }
+    }
+}
+
+/// Waits for a `Failed` event of `operation` and returns its message.
+async fn expect_failure(worker: &mut Worker, operation: Operation) -> String {
+    expect(worker, |e| match e {
+        Event::Failed {
+            operation: op,
+            message,
+        } if op == operation => Some(message),
+        _ => None,
+    })
+    .await
+}
+
+fn writable() -> Profile {
+    let mut profile = Profile::adhoc(bootstrap());
+    profile.read_only = false;
+    profile
+}
+
+fn unique(prefix: &str) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    format!("{prefix}-{nanos}")
+}
+
+/// Commits offsets for `group` without joining it, leaving the group Empty.
+fn commit_offsets(group: &str, topic: &str, offsets: &[(i32, i64)]) {
+    let consumer: BaseConsumer = ClientConfig::new()
+        .set("bootstrap.servers", bootstrap())
+        .set("group.id", group)
+        .set("enable.auto.commit", "false")
+        .create()
+        .unwrap();
+    let mut tpl = TopicPartitionList::new();
+    for &(partition, offset) in offsets {
+        tpl.add_partition_offset(topic, partition, Offset::Offset(offset))
+            .unwrap();
+    }
+    consumer.commit(&tpl, CommitMode::Sync).unwrap();
+}
+
+#[tokio::test]
+#[ignore = "needs a Kafka broker"]
+async fn group_lag_and_offset_reset() {
+    let topic = TestTopic::create().await;
+    for i in 0..5 {
+        produce(&topic.name, 0, &format!("k{i}"), b"p0").await;
+    }
+    for i in 0..3 {
+        produce(&topic.name, 1, &format!("k{i}"), b"p1").await;
+    }
+    let group = unique("kaffy-test-group");
+    commit_offsets(&group, &topic.name, &[(0, 2), (1, 1)]);
+
+    let mut worker = kaffy_kafka::spawn(&writable()).unwrap();
+    worker.commands.send(Command::ListGroups).unwrap();
+    let summary = expect(&mut worker, |e| match e {
+        Event::Groups(groups) => groups.into_iter().find(|g| g.name == group),
+        _ => None,
+    })
+    .await;
+    assert_eq!(summary.state, GroupState::Empty);
+    assert_eq!(summary.topics, vec![topic.name.clone()]);
+    assert_eq!(summary.lag, Some(3 + 2));
+
+    worker
+        .commands
+        .send(Command::DescribeGroup(group.clone()))
+        .unwrap();
+    let detail = expect(&mut worker, |e| match e {
+        Event::GroupDetail(d) => Some(d),
+        _ => None,
+    })
+    .await;
+    let lags: Vec<_> = detail
+        .partitions
+        .iter()
+        .map(|p| (p.partition, p.committed, p.end))
+        .collect();
+    assert_eq!(lags, vec![(0, 2, 5), (1, 1, 3)]);
+
+    // Each target, previewed without changing anything.
+    let mut plan_for = async |target| {
+        worker
+            .commands
+            .send(Command::PlanReset {
+                group: group.clone(),
+                topic: None,
+                target,
+            })
+            .unwrap();
+        expect(&mut worker, |e| match e {
+            Event::ResetPlan(p) => Some(p),
+            _ => None,
+        })
+        .await
+    };
+    let new_offsets =
+        |plan: &kaffy_kafka::ResetPlan| plan.rows.iter().map(|r| r.new).collect::<Vec<_>>();
+    assert_eq!(
+        new_offsets(&plan_for(ResetTarget::Latest).await),
+        vec![5, 3]
+    );
+    assert_eq!(
+        new_offsets(&plan_for(ResetTarget::Offset(4)).await),
+        vec![4, 3],
+        "clamped to the end"
+    );
+    let future = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+        + 3_600_000;
+    assert_eq!(
+        new_offsets(&plan_for(ResetTarget::Timestamp(future)).await),
+        vec![5, 3]
+    );
+    let earliest = plan_for(ResetTarget::Earliest).await;
+    assert_eq!(new_offsets(&earliest), vec![0, 0]);
+    assert_eq!(earliest.rows[0].current, Some(2));
+
+    // Read-only profiles refuse to apply.
+    let mut read_only = kaffy_kafka::spawn(&Profile::adhoc(bootstrap())).unwrap();
+    read_only
+        .commands
+        .send(Command::ApplyReset {
+            group: group.clone(),
+            offsets: earliest.offsets(),
+        })
+        .unwrap();
+    assert!(
+        expect_failure(&mut read_only, Operation::ApplyReset)
+            .await
+            .contains("read-only")
+    );
+
+    worker
+        .commands
+        .send(Command::ApplyReset {
+            group: group.clone(),
+            offsets: earliest.offsets(),
+        })
+        .unwrap();
+    let applied = expect(&mut worker, |e| match e {
+        Event::ResetApplied { partitions, .. } => Some(partitions),
+        _ => None,
+    })
+    .await;
+    assert_eq!(applied, 2);
+    worker
+        .commands
+        .send(Command::DescribeGroup(group.clone()))
+        .unwrap();
+    let detail = expect(&mut worker, |e| match e {
+        Event::GroupDetail(d) => Some(d),
+        _ => None,
+    })
+    .await;
+    assert_eq!(detail.total_lag(), 8);
+
+    // An active member blocks the reset.
+    let member: BaseConsumer = ClientConfig::new()
+        .set("bootstrap.servers", bootstrap())
+        .set("group.id", &group)
+        .set("enable.auto.commit", "false")
+        .create()
+        .unwrap();
+    member.subscribe(&[&topic.name]).unwrap();
+    let joined = tokio::time::Instant::now() + TIMEOUT;
+    while member.assignment().unwrap().count() == 0 {
+        assert!(tokio::time::Instant::now() < joined, "member never joined");
+        member.poll(Duration::from_millis(200));
+    }
+    worker
+        .commands
+        .send(Command::ApplyReset {
+            group: group.clone(),
+            offsets: earliest.offsets(),
+        })
+        .unwrap();
+    let error = expect_failure(&mut worker, Operation::ApplyReset).await;
+    assert!(error.contains("active member"), "{error}");
+
+    // Leave no test group behind on the cluster.
+    member.unsubscribe();
+    drop(member);
+    let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
+        .set("bootstrap.servers", bootstrap())
+        .create()
+        .unwrap();
+    for _ in 0..20 {
+        let deleted = admin
+            .delete_groups(&[&group], &AdminOptions::new())
+            .await
+            .unwrap();
+        if deleted.iter().all(|r| r.is_ok()) {
+            break;
+        }
+        // The departed member may still be leaving; deletion needs an empty group.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs a Kafka broker"]
+async fn produce_and_filtered_replay() {
+    let source = TestTopic::create().await;
+    let target = TestTopic::create().await;
+    let mut worker = kaffy_kafka::spawn(&writable()).unwrap();
+
+    // Produce through the worker, with headers and an explicit partition.
+    for (i, value) in ["keep-1", "drop-1", "keep-2", "drop-2", "keep-3"]
+        .iter()
+        .enumerate()
+    {
+        let request = ProduceRequest {
+            id: i as u64,
+            topic: source.name.clone(),
+            partition: Some((i % 2) as i32),
+            key: Some(format!("key-{i}").into_bytes()),
+            value: Some(Payload::Bytes(value.as_bytes().to_vec())),
+            headers: vec![Header {
+                key: "trace".into(),
+                value: Some(format!("t{i}").into_bytes()),
+            }],
+        };
+        worker.commands.send(Command::Produce(request)).unwrap();
+        let (id, partition) = expect(&mut worker, |e| match e {
+            Event::Produced { id, partition, .. } => Some((id, partition)),
+            Event::Failed { message, .. } => panic!("produce failed: {message}"),
+            _ => None,
+        })
+        .await;
+        assert_eq!((id, partition), (i as u64, (i % 2) as i32));
+    }
+
+    // A mistyped topic is refused, not auto-created.
+    let missing = unique("kaffy-test-missing");
+    worker
+        .commands
+        .send(Command::Produce(ProduceRequest {
+            id: 99,
+            topic: missing.clone(),
+            partition: None,
+            key: None,
+            value: Some(Payload::Bytes(b"x".to_vec())),
+            headers: vec![],
+        }))
+        .unwrap();
+    assert!(
+        expect_failure(&mut worker, Operation::Produce)
+            .await
+            .contains("does not exist")
+    );
+
+    worker
+        .commands
+        .send(Command::PlanReplay {
+            source: source.name.clone(),
+            target: target.name.clone(),
+            start: StartAt::Beginning,
+            end: ReplayEnd::Now,
+        })
+        .unwrap();
+    let plan = expect(&mut worker, |e| match e {
+        Event::ReplayPlan(p) => Some(p),
+        Event::Failed { message, .. } => panic!("plan failed: {message}"),
+        _ => None,
+    })
+    .await;
+    assert_eq!(plan.total(), 5);
+    assert!(plan.keep_partitions);
+
+    let filter =
+        RecordFilter::new(|r: &Record| r.value.as_deref().is_some_and(|v| v.starts_with(b"keep")));
+    worker
+        .commands
+        .send(Command::Replay {
+            id: 7,
+            plan,
+            filter: Some(filter),
+        })
+        .unwrap();
+    let done = expect(&mut worker, |e| match e {
+        Event::ReplayProgress(p) if p.done => Some(p),
+        _ => None,
+    })
+    .await;
+    assert_eq!((done.scanned, done.produced, done.error), (5, 3, None));
+
+    // The copies keep key, headers and partition.
+    let copies = tail(&mut worker, &target.name, StartAt::Beginning, 3).await;
+    let summary: Vec<_> = copies
+        .iter()
+        .map(|r| {
+            (
+                r.partition,
+                String::from_utf8_lossy(r.key.as_deref().unwrap()).into_owned(),
+                String::from_utf8_lossy(r.value.as_deref().unwrap()).into_owned(),
+                String::from_utf8_lossy(r.headers[0].value.as_deref().unwrap()).into_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        vec![
+            (0, "key-0".into(), "keep-1".into(), "t0".into()),
+            (0, "key-2".into(), "keep-2".into(), "t2".into()),
+            (0, "key-4".into(), "keep-3".into(), "t4".into()),
+        ]
+    );
+    // Confirm the mistyped topic really was not created.
+    let admin: BaseConsumer = ClientConfig::new()
+        .set("bootstrap.servers", bootstrap())
+        .create()
+        .unwrap();
+    let metadata = admin.fetch_metadata(None, TIMEOUT).unwrap();
+    assert!(metadata.topics().iter().all(|t| t.name() != missing));
+}

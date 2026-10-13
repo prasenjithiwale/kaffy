@@ -6,6 +6,10 @@
 
 mod client;
 mod demo;
+mod groups;
+mod replay;
+
+use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
@@ -46,7 +50,130 @@ pub enum Command {
     StopTail,
     Pause,
     Resume,
+    /// Consumer groups with their total lag; answered with [`Event::Groups`].
+    ListGroups,
+    /// Per-partition lag and members; answered with [`Event::GroupDetail`].
+    DescribeGroup(String),
+    /// Work out new offsets without changing anything; answered with [`Event::ResetPlan`].
+    PlanReset {
+        group: String,
+        /// Only this topic, or every topic the group has offsets for.
+        topic: Option<String>,
+        target: ResetTarget,
+    },
+    /// Commit the offsets of a plan; answered with [`Event::ResetApplied`].
+    /// Refused unless the group has no active members.
+    ApplyReset {
+        group: String,
+        offsets: Vec<PartitionOffset>,
+    },
+    /// Answered with [`Event::Produced`].
+    Produce(ProduceRequest),
+    /// Resolve a range to copy; answered with [`Event::ReplayPlan`].
+    PlanReplay {
+        source: String,
+        target: String,
+        start: StartAt,
+        end: ReplayEnd,
+    },
+    /// Copy the plan's records to its target, reporting [`Event::ReplayProgress`].
+    Replay {
+        id: u64,
+        plan: ReplayPlan,
+        filter: Option<RecordFilter>,
+    },
+    CancelReplay,
 }
+
+/// The operation an [`Event::Failed`] belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Operation {
+    ListGroups,
+    DescribeGroup,
+    PlanReset,
+    ApplyReset,
+    Produce,
+    PlanReplay,
+    Replay,
+}
+
+/// Where an offset reset moves a group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResetTarget {
+    Earliest,
+    Latest,
+    /// The first offset at or after this time (epoch ms); the end if none.
+    Timestamp(i64),
+    /// This offset in every partition, clamped to what the partition holds.
+    Offset(i64),
+}
+
+/// Where a replay stops (exclusive), applied to every partition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayEnd {
+    /// The end of each partition when the plan is made.
+    Now,
+    Offset(i64),
+    /// Epoch milliseconds.
+    Timestamp(i64),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartitionOffset {
+    pub topic: String,
+    pub partition: i32,
+    pub offset: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProduceRequest {
+    pub id: u64,
+    pub topic: String,
+    /// `None` lets the partitioner choose from the key.
+    pub partition: Option<i32>,
+    pub key: Option<Vec<u8>>,
+    /// `None` produces a tombstone.
+    pub value: Option<Payload>,
+    pub headers: Vec<Header>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Payload {
+    Bytes(Vec<u8>),
+    /// JSON to encode as Avro with this Schema Registry schema.
+    Avro {
+        schema_id: u32,
+        json: serde_json::Value,
+    },
+}
+
+/// A predicate on records, used to replay only what the current filter shows.
+#[derive(Clone)]
+pub struct RecordFilter(Arc<dyn Fn(&Record) -> bool + Send + Sync>);
+
+impl RecordFilter {
+    pub fn new(f: impl Fn(&Record) -> bool + Send + Sync + 'static) -> Self {
+        Self(Arc::new(f))
+    }
+
+    pub fn matches(&self, record: &Record) -> bool {
+        (self.0)(record)
+    }
+}
+
+impl std::fmt::Debug for RecordFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RecordFilter(..)")
+    }
+}
+
+impl PartialEq for RecordFilter {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for RecordFilter {}
 
 /// Where a tail starts reading, applied to every partition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,7 +202,174 @@ pub enum Event {
         /// Boxed: records are much larger than the other events.
         record: Box<Record>,
     },
+    Groups(Vec<GroupSummary>),
+    GroupDetail(GroupDetail),
+    ResetPlan(ResetPlan),
+    ResetApplied {
+        group: String,
+        partitions: usize,
+    },
+    Produced {
+        id: u64,
+        topic: String,
+        partition: i32,
+        offset: i64,
+    },
+    ReplayPlan(ReplayPlan),
+    ReplayProgress(ReplayProgress),
+    /// A command failed; the UI closes whatever was waiting for it.
+    Failed {
+        operation: Operation,
+        message: String,
+    },
     Error(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GroupState {
+    Stable,
+    /// No members: offsets can be reset.
+    Empty,
+    Rebalancing,
+    Dead,
+    Other(String),
+}
+
+impl GroupState {
+    pub fn parse(state: &str) -> Self {
+        match state {
+            "Stable" => Self::Stable,
+            "Empty" => Self::Empty,
+            "PreparingRebalance" | "CompletingRebalance" | "AwaitingSync" => Self::Rebalancing,
+            "Dead" => Self::Dead,
+            other => Self::Other(other.to_owned()),
+        }
+    }
+
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Stable => "Stable",
+            Self::Empty => "Empty",
+            Self::Rebalancing => "Rebalancing",
+            Self::Dead => "Dead",
+            Self::Other(s) => s,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupSummary {
+    pub name: String,
+    pub state: GroupState,
+    pub members: usize,
+    /// Topics the group has committed offsets for.
+    pub topics: Vec<String>,
+    /// Sum of per-partition lag; `None` when offsets could not be read.
+    pub lag: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupDetail {
+    pub name: String,
+    pub state: GroupState,
+    pub members: Vec<GroupMember>,
+    pub partitions: Vec<PartitionLag>,
+}
+
+impl GroupDetail {
+    pub fn total_lag(&self) -> i64 {
+        self.partitions.iter().map(PartitionLag::lag).sum()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupMember {
+    pub client_id: String,
+    pub host: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartitionLag {
+    pub topic: String,
+    pub partition: i32,
+    pub committed: i64,
+    /// High watermark: the offset the next message will get.
+    pub end: i64,
+}
+
+impl PartitionLag {
+    pub fn lag(&self) -> i64 {
+        (self.end - self.committed).max(0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResetPlan {
+    pub group: String,
+    pub state: GroupState,
+    pub target: ResetTarget,
+    pub rows: Vec<ResetRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResetRow {
+    pub topic: String,
+    pub partition: i32,
+    /// `None` when the group has no committed offset for the partition.
+    pub current: Option<i64>,
+    pub new: i64,
+    pub end: i64,
+}
+
+impl ResetPlan {
+    pub fn offsets(&self) -> Vec<PartitionOffset> {
+        self.rows
+            .iter()
+            .map(|r| PartitionOffset {
+                topic: r.topic.clone(),
+                partition: r.partition,
+                offset: r.new,
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayPlan {
+    pub source: String,
+    pub target: String,
+    pub ranges: Vec<PartitionRange>,
+    pub target_partitions: usize,
+    /// Records keep their partition number (when the partition counts match);
+    /// otherwise the key decides, as with Java clients.
+    pub keep_partitions: bool,
+}
+
+impl ReplayPlan {
+    /// Offsets in range; compacted or filtered topics may yield fewer records.
+    pub fn total(&self) -> i64 {
+        self.ranges.iter().map(|r| (r.to - r.from).max(0)).sum()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartitionRange {
+    pub partition: i32,
+    /// First offset to copy.
+    pub from: i64,
+    /// Offset to stop before.
+    pub to: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayProgress {
+    pub id: u64,
+    /// Records read from the source.
+    pub scanned: u64,
+    /// Records written to the target (after the filter).
+    pub produced: u64,
+    pub done: bool,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

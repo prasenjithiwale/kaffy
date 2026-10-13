@@ -10,7 +10,7 @@ mod registry;
 use std::fmt::Write as _;
 
 pub use apache_avro::Schema as AvroSchema;
-pub use registry::{Registry, decode_avro};
+pub use registry::{Registry, decode_avro, encode_avro};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {

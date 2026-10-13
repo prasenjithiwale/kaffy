@@ -1,3 +1,4 @@
+mod editor;
 mod keymap;
 
 use std::path::PathBuf;
@@ -47,9 +48,10 @@ async fn main() -> Result<()> {
     tracing::info!(?args, "starting kaffy");
 
     let (worker, state) = if args.demo {
+        // The demo cluster is fake, so it accepts writes: try produce, replay and resets.
         (
             kaffy_kafka::spawn_demo(),
-            AppState::new("demo", true, false),
+            AppState::new("demo", false, false),
         )
     } else {
         let profile = resolve_profile(&args)?;
@@ -125,6 +127,8 @@ struct App {
     state: AppState,
     worker: Worker,
     clipboard: Option<arboard::Clipboard>,
+    /// A template to open in `$EDITOR` once the current event is handled.
+    pending_edit: Option<String>,
 }
 
 impl App {
@@ -133,6 +137,7 @@ impl App {
             state,
             worker,
             clipboard: None,
+            pending_edit: None,
         }
     }
 
@@ -144,6 +149,16 @@ impl App {
         let mut dirty = true;
 
         while !self.state.should_quit {
+            if let Some(template) = self.pending_edit.take() {
+                let result = editor::edit(terminal, &template);
+                // The old stream may hold keys typed in the editor; start fresh.
+                terminal_events = EventStream::new();
+                match result {
+                    Ok(text) => self.dispatch(Action::Edited(text)),
+                    Err(e) => self.state.flash_error(format!("editor: {e:#}")),
+                }
+                dirty = true;
+            }
             tokio::select! {
                 _ = frames.tick() => {
                     self.dispatch(Action::Tick);
@@ -176,10 +191,43 @@ impl App {
     }
 
     fn dispatch(&mut self, action: Action) {
-        match self.state.update(action) {
-            None => {}
-            Some(Effect::Kafka(command)) => self.send(command),
-            Some(Effect::Copy { what, text }) => self.copy(what, text),
+        if let Some(effect) = self.state.update(action) {
+            self.apply(effect);
+        }
+    }
+
+    fn apply(&mut self, effect: Effect) {
+        match effect {
+            Effect::Kafka(command) => self.send(command),
+            Effect::Copy { what, text } => self.copy(what, text),
+            Effect::Many(effects) => effects.into_iter().for_each(|e| self.apply(e)),
+            Effect::WriteFile {
+                path,
+                contents,
+                summary,
+            } => self.write_file(&path, &contents, &summary),
+            Effect::Edit { template } => self.pending_edit = Some(template),
+        }
+    }
+
+    /// Writes into the working directory, never over an existing file.
+    fn write_file(&mut self, path: &str, contents: &str, summary: &str) {
+        let result = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .and_then(|mut file| std::io::Write::write_all(&mut file, contents.as_bytes()));
+        match result {
+            Ok(()) => {
+                let shown = std::env::current_dir()
+                    .map(|dir| dir.join(path).display().to_string())
+                    .unwrap_or_else(|_| path.to_owned());
+                self.state
+                    .flash_info(format!("exported {summary} to {shown}"));
+            }
+            Err(e) => self
+                .state
+                .flash_error(format!("export to {path} failed: {e}")),
         }
     }
 

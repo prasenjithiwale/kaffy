@@ -100,6 +100,21 @@ impl Registry {
         })
     }
 
+    /// Encodes `json` with Avro schema `schema_id`, in the Confluent wire format.
+    /// The JSON is matched to the schema the way the decoder prints it: unions
+    /// unwrapped, enums as their symbol.
+    pub async fn encode_avro(
+        &self,
+        schema_id: u32,
+        json: &serde_json::Value,
+    ) -> Result<Vec<u8>, String> {
+        let parsed = self.schema(schema_id).await?;
+        let Parsed::Avro { schema, references } = parsed.as_ref() else {
+            return Err(format!("schema {schema_id} is not an Avro schema"));
+        };
+        encode_avro_body(schema, references, json).map(|body| wire(schema_id, &body))
+    }
+
     async fn schema(&self, id: u32) -> Result<Arc<Parsed>, String> {
         let mut cache = self.cache.lock().await;
         match cache.get(&id) {
@@ -243,6 +258,15 @@ fn decode_with(parsed: &Parsed, schema_id: u32, bytes: &[u8]) -> Decoded {
     }
 }
 
+/// Encodes JSON as Avro with a known schema, in the Confluent wire format.
+pub fn encode_avro(
+    schema: &AvroSchema,
+    schema_id: u32,
+    json: &serde_json::Value,
+) -> Result<Vec<u8>, String> {
+    encode_avro_body(schema, &[], json).map(|body| wire(schema_id, &body))
+}
+
 /// Decodes an Avro payload in the Confluent wire format with a known schema.
 pub fn decode_avro(schema: &AvroSchema, bytes: &[u8]) -> Option<Decoded> {
     let (schema_id, body) = wire_header(bytes)?;
@@ -251,6 +275,37 @@ pub fn decode_avro(schema: &AvroSchema, bytes: &[u8]) -> Option<Decoded> {
         schema_type: Some(SchemaType::Avro),
         result: decode_avro_body(schema, &[], body),
     })
+}
+
+fn wire(schema_id: u32, body: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(body.len() + 5);
+    bytes.push(0);
+    bytes.extend_from_slice(&schema_id.to_be_bytes());
+    bytes.extend_from_slice(body);
+    bytes
+}
+
+fn encode_avro_body(
+    schema: &AvroSchema,
+    references: &[AvroSchema],
+    json: &serde_json::Value,
+) -> Result<Vec<u8>, String> {
+    let error = |e: apache_avro::Error| format!("does not match the Avro schema: {e}");
+    let value = apache_avro::types::Value::try_from(json.clone()).map_err(error)?;
+    let value = value
+        .resolve_schemata(schema, references.iter().collect())
+        .map_err(error)?;
+    let builder = apache_avro::writer::datum::GenericDatumWriter::builder(schema);
+    let writer = if references.is_empty() {
+        builder.build()
+    } else {
+        builder
+            .schemata(references.iter().collect())
+            .map_err(error)?
+            .build()
+    }
+    .map_err(error)?;
+    writer.write_value_to_vec(value).map_err(error)
 }
 
 fn decode_avro_body(
@@ -407,6 +462,33 @@ mod tests {
             .unwrap();
         assert_eq!(second.result.unwrap()["note"], serde_json::Value::Null);
         assert_eq!(mock.hits("/schemas/ids/7"), 1, "schema is cached");
+    }
+
+    #[tokio::test]
+    async fn encodes_json_back_to_avro() {
+        let mock = MockRegistry::start(vec![("/schemas/ids/7", 200, schema_body(ORDER))]).await;
+        let registry = Registry::new(&mock.url, None).unwrap();
+        let json = json!({"id": "ord-9", "amount": 3, "status": "NEW", "note": "fragile"});
+        let bytes = registry.encode_avro(7, &json).await.unwrap();
+        assert_eq!(&bytes[..5], &[0, 0, 0, 0, 7]);
+        // Round trip: integers widen to the schema's double.
+        let decoded = registry.decode(&bytes).await.unwrap().result.unwrap();
+        assert_eq!(
+            decoded,
+            json!({"id": "ord-9", "amount": 3.0, "status": "NEW", "note": "fragile"})
+        );
+
+        let null_note = json!({"id": "ord-9", "amount": 1.5, "status": "PAID", "note": null});
+        assert!(registry.encode_avro(7, &null_note).await.is_ok());
+
+        let error = registry
+            .encode_avro(7, &json!({"id": "ord-9", "status": "SHIPPED"}))
+            .await
+            .unwrap_err();
+        assert!(
+            error.starts_with("does not match the Avro schema"),
+            "{error}"
+        );
     }
 
     #[tokio::test]
