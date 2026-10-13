@@ -3,6 +3,16 @@
 A terminal UI for exploring and operating Kafka clusters, written in Rust.
 See [docs/kafka-tui-feasibility.md](docs/kafka-tui-feasibility.md) for scope and roadmap.
 
+## Install
+
+On Linux x86_64 (glibc 2.35+):
+
+```sh
+curl -fsSL https://prasenjithiwale.github.io/folio/kaffy/install.sh | sh
+```
+
+See https://prasenjithiwale.github.io/folio/kaffy/ for options and manual downloads.
+
 ## Quick start
 
 ```sh
@@ -95,5 +105,20 @@ cargo test --workspace
 cargo clippy --workspace --all-targets
 cargo test -p kaffy-kafka --test local_broker -- --ignored   # end-to-end, needs a broker on localhost:9092
 ```
+
+## Releases
+
+`.github/workflows/ci.yml` runs formatting, clippy, unit tests and the broker tests (against a Kafka
+service container) on every push. Pushing a tag that matches the crate version releases it:
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+`.github/workflows/release.yml` then builds the Linux x86_64 binary on Ubuntu 22.04, publishes the archive
+and checksum to the public [folio](https://github.com/prasenjithiwale/folio) site (using the `FOLIO_DEPLOY_KEY`
+secret, a write deploy key on folio), and runs the install one-liner on Ubuntu 22.04 and Debian 12 to check it.
+
+The screens on the website are rendered from the real UI with `cargo run -p kaffy-ui --example snapshot`.
 
 Dev builds skip debug info for dependencies (see `Cargo.toml`) to keep `target/` small.

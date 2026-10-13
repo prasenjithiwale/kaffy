@@ -1,5 +1,6 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Row, Table, TableState};
 
@@ -25,28 +26,30 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut AppState) {
         Some(1) => "1 partition".to_owned(),
         Some(n) => format!("{n} partitions"),
     };
-    let mut info = vec![Span::styled(
-        format!(
-            " {partitions} · from {} · {} buffered (max {BUFFER_CAPACITY}) · {} received ",
-            fmt::start_at(tail.start),
-            tail.rows.len(),
-            tail.received,
-        ),
-        theme::dim(),
-    )];
-    if let Some(error) = tail.filter_error() {
-        info.push(Span::styled(format!(" filter: {error} "), theme::error()));
-    } else if !tail.filter.is_empty() {
-        info.push(Span::styled(
-            format!(" filter: {} · {} match ", tail.filter, visible.len()),
-            theme::warning(),
-        ));
-    }
-    info.push(status);
+    let title = format!(" {} ", tail.topic);
+    let info = info_title(
+        &[
+            partitions,
+            format!("from {}", fmt::start_at(tail.start)),
+            format!("{} buffered (max {BUFFER_CAPACITY})", tail.rows.len()),
+            format!("{} received", tail.received),
+        ],
+        match tail.filter_error() {
+            Some(error) => Some((format!("filter: {error}"), theme::error())),
+            None if !tail.filter.is_empty() => Some((
+                format!("filter: {} · {} match", tail.filter, visible.len()),
+                theme::warning(),
+            )),
+            None => None,
+        },
+        status,
+        // Borders, the topic title and a gap between the two titles.
+        (area.width as usize).saturating_sub(title.chars().count() + 3),
+    );
 
     let block = Block::bordered()
-        .title(Line::styled(format!(" {} ", tail.topic), theme::title()))
-        .title(Line::from(info).right_aligned());
+        .title(Line::styled(title, theme::title()))
+        .title(info.right_aligned());
 
     if visible.is_empty() {
         let inner = block.inner(area);
@@ -122,4 +125,42 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut AppState) {
 
     let mut table_state = TableState::default().with_selected(selected - tail.scroll);
     frame.render_stateful_widget(table, area, &mut table_state);
+}
+
+/// The right-hand title: stats, filter and status, shortened to fit `width` so it
+/// never covers the topic name. Stats are dropped from the end first, then the
+/// filter text is truncated; the status is always shown.
+fn info_title(
+    stats: &[String],
+    filter: Option<(String, Style)>,
+    status: Span<'static>,
+    width: usize,
+) -> Line<'static> {
+    let stats_span = |n: usize| match n {
+        0 => Span::raw(""),
+        n => Span::styled(format!(" {} ", stats[..n].join(" · ")), theme::dim()),
+    };
+    let filter_width = filter
+        .as_ref()
+        .map_or(0, |(text, _)| text.chars().count() + 2);
+    let mut kept = stats.len();
+    while kept > 0 && stats_span(kept).width() + filter_width + status.width() > width {
+        kept -= 1;
+    }
+    let mut spans = vec![stats_span(kept)];
+    if let Some((text, style)) = filter {
+        let room = width
+            .saturating_sub(spans[0].width() + status.width() + 2)
+            .max(1);
+        let text = if text.chars().count() > room {
+            let mut short: String = text.chars().take(room - 1).collect();
+            short.push('…');
+            short
+        } else {
+            text
+        };
+        spans.push(Span::styled(format!(" {text} "), style));
+    }
+    spans.push(status);
+    Line::from(spans)
 }

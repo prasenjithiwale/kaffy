@@ -1,0 +1,146 @@
+# Builds a Linux release when a v* tag is pushed and publishes it to the public
+# folio site (github.com/prasenjithiwale/folio), which serves the install script:
+#
+#   curl -fsSL https://prasenjithiwale.github.io/folio/kaffy/install.sh | sh
+#
+# Needs the FOLIO_DEPLOY_KEY secret: the private half of a write deploy key on folio.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build, e.g. v0.1.0"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  TAG: ${{ inputs.tag || github.ref_name }}
+  TARGET: x86_64-unknown-linux-gnu
+  SITE: https://prasenjithiwale.github.io/folio/kaffy
+
+jobs:
+  build:
+    # Building on the oldest runner keeps the glibc requirement at 2.35.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check the tag matches the crate version
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "kaffy") | .version')
+          if [ "v$version" != "$TAG" ]; then
+            echo "::error::Tag $TAG does not match Cargo version v$version"; exit 1
+          fi
+
+      - name: Build
+        run: cargo build --release --locked -p kaffy
+
+      - name: Package
+        run: |
+          name="kaffy-$TAG-$TARGET"
+          mkdir -p "dist/$name"
+          cp target/release/kaffy README.md config.example.toml "dist/$name/"
+          ./target/release/kaffy --version
+          echo "Dynamic libraries:"; ldd target/release/kaffy
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+          rm -r "dist/$name"
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: GitHub release (kaffy, private)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --title "kaffy $TAG" --generate-notes --verify-tag
+          fi
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    concurrency: folio-publish
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - uses: actions/checkout@v4
+        with:
+          repository: prasenjithiwale/folio
+          ssh-key: ${{ secrets.FOLIO_DEPLOY_KEY }}
+          path: folio
+
+      - name: Add release to folio
+        run: |
+          releases=folio/kaffy/releases
+          mkdir -p "$releases/$TAG"
+          cp dist/* "$releases/$TAG/"
+          archive="kaffy-$TAG-$TARGET.tar.gz"
+          sha256=$(cut -d' ' -f1 "dist/$archive.sha256")
+          size=$(stat -c %s "dist/$archive")
+          printf '%s\n' "$TAG" > "$releases/latest.txt"
+          jq -n --arg tag "$TAG" --arg target "$TARGET" --arg file "$archive" \
+                --arg sha256 "$sha256" --argjson size "$size" \
+                --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{version: $tag, published_at: $date,
+              assets: [{target: $target, url: ($tag + "/" + $file), size: $size, sha256: $sha256}]}' \
+            > "$releases/latest.json"
+          cat "$releases/latest.json"
+
+      - name: Push to folio
+        working-directory: folio
+        run: |
+          git config user.name "kaffy release"
+          git config user.email "kaffy-release@users.noreply.github.com"
+          git add kaffy/releases
+          git commit -m "kaffy $TAG"
+          git push
+
+  smoke-test:
+    # Installs exactly as a user would, once GitHub Pages serves the new release.
+    needs: publish
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: Wait for GitHub Pages
+        run: |
+          for i in $(seq 1 60); do
+            latest=$(curl -fsSL "$SITE/releases/latest.txt?nocache=$i" 2>/dev/null || true)
+            if [ "$latest" = "$TAG" ]; then echo "Pages serves $TAG"; exit 0; fi
+            sleep 10
+          done
+          echo "::error::Pages still serves '$latest' instead of $TAG"; exit 1
+
+      - name: Install on Ubuntu 22.04 with sh
+        run: |
+          curl -fsSL "$SITE/install.sh" | sh
+          "$HOME/.local/bin/kaffy" --version | tee /dev/stderr | grep -q "${TAG#v}"
+
+      - name: Install on Debian 12 with bash
+        run: |
+          docker run --rm -e TAG debian:12-slim bash -euc '
+            apt-get update -qq && apt-get install -y -qq curl ca-certificates >/dev/null
+            curl -fsSL '"$SITE"'/install.sh | bash
+            /root/.local/bin/kaffy --version | tee /dev/stderr | grep -q "${TAG#v}"
+          '

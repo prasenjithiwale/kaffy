@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    # The oldest supported runner, so release binaries (built the same way) run on glibc 2.35+.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    services:
+      # Single-node KRaft broker for the end-to-end tests in crates/kafka/tests.
+      kafka:
+        image: apache/kafka:3.9.1
+        ports: ["9092:9092"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Unit tests
+        run: cargo test --workspace --locked
+
+      - name: Wait for Kafka
+        run: |
+          for i in $(seq 1 60); do
+            if docker exec ${{ job.services.kafka.id }} /opt/kafka/bin/kafka-topics.sh \
+                 --bootstrap-server localhost:9092 --list >/dev/null 2>&1; then
+              echo "Kafka ready after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Kafka did not start"; exit 1
+      - name: Broker tests
+        run: cargo test -p kaffy-kafka --test local_broker --locked -- --ignored

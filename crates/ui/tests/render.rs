@@ -35,7 +35,11 @@ fn record(offset: i64, value: Option<&str>) -> Record {
 }
 
 fn draw(state: &mut AppState) -> String {
-    let mut terminal = Terminal::new(TestBackend::new(110, 20)).unwrap();
+    draw_sized(state, 110, 20)
+}
+
+fn draw_sized(state: &mut AppState, width: u16, height: u16) -> String {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     terminal
         .draw(|frame| kaffy_ui::render(frame, state))
         .unwrap();
@@ -135,4 +139,27 @@ fn detail_screen() {
     assert!(screen.contains("trace-id = abc123"));
     assert!(screen.contains("(json, 42 bytes)"));
     assert!(screen.contains(r#""status": "PAID","#));
+}
+
+#[test]
+fn long_filter_never_hides_the_topic_name() {
+    let mut state = state_with_messages();
+    state.update(Action::BeginInput(InputKind::Filter));
+    for c in r#"~"status":"(PAID|SHIPPED|CANCELLED|CREATED)" p:0,1,2 after:-1d"#.chars() {
+        state.update(Action::InputChar(c));
+    }
+    state.update(Action::InputSubmit);
+    for width in [60, 80, 110, 160] {
+        let screen = draw_sized(&mut state, width, 12);
+        let title = screen.lines().nth(1).unwrap();
+        assert!(title.starts_with("┌ orders "), "width {width}: {title}");
+        assert!(
+            title.contains("LIVE"),
+            "width {width}: status is always shown: {title}"
+        );
+        assert!(title.contains("filter: "), "width {width}: {title}");
+    }
+    // Wide enough for everything.
+    let wide = draw_sized(&mut state, 200, 12);
+    assert!(wide.lines().nth(1).unwrap().contains("30 received"));
 }
