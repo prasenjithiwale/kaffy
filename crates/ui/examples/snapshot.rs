@@ -227,7 +227,13 @@ fn draw(state: &mut AppState) -> String {
             }
             escape_into(&mut run_text, cell.symbol());
         }
-        flush(&mut html, &run_classes, run_text.trim_end());
+        // Trailing blanks only matter when they are painted, like a striped row.
+        let text = if run_classes.contains("background") {
+            &run_text
+        } else {
+            run_text.trim_end()
+        };
+        flush(&mut html, &run_classes, text);
         html.push('\n');
     }
     html
@@ -253,9 +259,12 @@ fn attributes(cell: &Cell) -> String {
         std::mem::swap(&mut fg, &mut bg);
         classes.push("rev".to_owned());
     }
+    // The page paints the screen's own background, so cells only carry the others.
+    let screen = kaffy_ui::theme::palette().bg;
     for (color, prefix, property) in [(fg, "fg", "color"), (bg, "bg", "background")] {
         match color {
             Color::Reset => {}
+            c if property == "background" && c == screen => {}
             Color::Rgb(r, g, b) => styles.push(format!("{property}:#{r:02x}{g:02x}{b:02x}")),
             named => classes.push(format!("{prefix}-{}", color_name(named))),
         }

@@ -102,7 +102,7 @@ jobs:
           file "$bin"
           case "$TARGET" in
             *linux-musl)
-              file "$bin" | grep -q "statically linked" \
+              file "$bin" | grep -Eq "static(ally|-pie) linked" \
                 || { echo "::error::the Linux binary must be static"; exit 1; }
               "$bin" --version ;;
             *apple-darwin)

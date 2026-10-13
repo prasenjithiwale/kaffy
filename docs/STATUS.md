@@ -19,6 +19,7 @@ The release pipeline is automated; a version tag triggers it. Steps (as done for
 
 1. **Bump the version** in the root `Cargo.toml` (`[workspace.package] version`), then run
    `cargo build` so `Cargo.lock` updates. `release.yml` refuses a tag that doesn't match this version.
+   To try the build matrix first: `gh workflow run release.yml -f tag=main -f dry_run=true`.
 2. **Refresh the website screenshots.** `crates/ui/examples/snapshot.rs` renders real screens from the
    demo cluster as HTML: `cargo run -p kaffy-ui --example snapshot > <scratch>/screens.html`. Add
    new screens to it as features land (the brokers screen is already in it, not yet on the site).
@@ -32,12 +33,14 @@ The release pipeline is automated; a version tag triggers it. Steps (as done for
 4. **Commit and push kaffy**, wait for CI to pass, then tag:
    `git tag -a vX.Y.Z -m "kaffy vX.Y.Z: ..." && git push origin vX.Y.Z`.
 5. **Watch the Release workflow** (`gh run list --repo prasenjithiwale/kaffy`). Its jobs are:
-   1. **build:** checks the version, builds on ubuntu-22.04, packages, and fails if the binary links libcurl.
+   1. **check / build:** checks the version, then builds `x86_64-unknown-linux-musl` (static, in an Alpine
+      container), `aarch64-apple-darwin` and `x86_64-apple-darwin` (cross-built on macos-15), and checks
+      each binary links only system libraries.
    2. **publish:** commits `kaffy/releases/vX.Y.Z/*`, `latest.txt` and `latest.json` into folio through
-      the `FOLIO_DEPLOY_KEY` deploy key.
-   3. **smoke-test:** waits for GitHub Pages, then runs the documented
-      `curl -fsSL https://prasenjithiwale.github.io/folio/kaffy/install.sh | sh` on Ubuntu 22.04 and
-      Debian 12 and checks `kaffy --version`.
+      the `FOLIO_DEPLOY_KEY` deploy key, and creates the (private) GitHub release.
+   3. **homebrew:** writes `Formula/kaffy.rb` to prasenjithiwale/homebrew-tap with `HOMEBREW_TAP_DEPLOY_KEY`.
+   4. **smoke-test:** waits for GitHub Pages, then runs the documented install one-liner on Ubuntu 22.04,
+      Debian 12, Alpine and macOS, and `brew install prasenjithiwale/tap/kaffy` on macOS.
 6. **Verify:** `curl -s https://prasenjithiwale.github.io/folio/kaffy/releases/latest.txt` shows the tag,
    then `git pull` in `~/Projects/folio` to pick up the release commit.
 
