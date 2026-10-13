@@ -8,6 +8,11 @@ default_profile = "local"
 # override it.
 # theme = "dark"
 
+# Rebind keys: command = "key" or ["key", ...]. See "Rebinding keys" in the README.
+# [keys]
+# pause = "p"
+# produce = "P"
+
 [profiles.local]
 bootstrap_servers = "localhost:9092"
 # read_only defaults to true: write operations stay disabled until you opt in.

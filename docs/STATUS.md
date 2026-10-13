@@ -82,7 +82,7 @@ than Homebrew's and has failed on new lints before.
 ## Testing
 
 ```sh
-cargo test --workspace                                           # unit + render tests (83)
+cargo test --workspace                                           # unit + render tests (94)
 cargo test -p kaffy-kafka --test local_broker -- --ignored       # Homebrew broker on 9092 (6 tests)
 docker compose -f dev/docker-compose.yml up -d --wait
 cargo test -p kaffy-schema --test real_registry -- --ignored     # real Schema Registry (1 test)
@@ -122,8 +122,10 @@ Done: **broker health view** (`4`): cluster id, reported controller, per-broker 
 offline and under-replicated partitions, brokers missing from metadata. On KRaft the "controller" clients
 see is a forwarding broker, not the active quorum controller; the screen says so.
 
-Remaining, from the roadmap: configurable keybindings; a command palette with fuzzy
-search; MSK IAM and Confluent Cloud authentication; static binaries and Homebrew / cargo-install
+Done: **keybindings** (`[keys]` in the config; registry in `crates/ui/src/commands.rs`, keymap in
+`keymap.rs`) and the **command palette** (`:` / `Ctrl-P`, `palette.rs`).
+
+Remaining, from the roadmap: MSK IAM and Confluent Cloud authentication; static binaries and Homebrew / cargo-install
 distribution. Consider macOS and arm64 builds too, since the site only offers Linux x86_64 today.
 Release as v0.4.0 when Phase 4 is done (or earlier if the user asks), adding the brokers screen to the site.
 

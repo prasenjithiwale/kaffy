@@ -5,6 +5,7 @@ mod dialog;
 mod groups;
 mod kit;
 mod messages;
+mod palette;
 mod schemas;
 mod topics;
 
@@ -13,6 +14,7 @@ use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
 
+use crate::commands;
 use crate::state::{AppState, Connection, InputKind, Screen};
 use crate::theme;
 
@@ -42,99 +44,28 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
     if state.show_help {
         render_help(frame, state);
     }
+    palette::render(frame, state);
 }
 
-/// Keys of each screen: (key, what it does). The footer shows the first few.
-fn keys(screen: Screen) -> &'static [(&'static str, &'static str)] {
-    match screen {
-        Screen::Topics => &[
-            ("↑↓", "move"),
-            ("⏎", "open"),
-            ("/", "filter"),
-            ("c", "config"),
-            ("n", "new topic"),
-            ("D", "delete"),
-            ("T", "delete records"),
-            ("?", "help"),
-            ("q", "quit"),
-            ("r", "refresh"),
-        ],
-        Screen::Schemas => &[
-            ("↑↓", "move"),
-            ("⏎", "open"),
-            ("n", "new subject"),
-            ("/", "filter"),
-            ("r", "refresh"),
-            ("?", "help"),
-            ("q", "quit"),
-        ],
-        Screen::SchemaDetail => &[
-            ("↑↓", "version"),
-            ("d", "diff with previous"),
-            ("e", "edit & register"),
-            ("PgUp/PgDn", "scroll"),
-            ("r", "refresh"),
-            ("?", "help"),
-            ("esc", "back"),
-        ],
-        Screen::TopicConfig => &[
-            ("↑↓", "move"),
-            ("⏎", "change value"),
-            ("u", "reset to inherited"),
-            ("r", "refresh"),
-            ("?", "help"),
-            ("esc", "back"),
-        ],
-        Screen::Messages => &[
-            ("↑↓", "move"),
-            ("⏎", "detail"),
-            ("space", "pause"),
-            ("/", "filter"),
-            ("p", "produce"),
-            ("E", "edit & produce"),
-            ("X", "replay"),
-            ("x", "export"),
-            ("?", "help"),
-            ("esc", "back"),
-            ("b / e", "read from the beginning / only new messages"),
-            ("o / t", "jump to an offset / a time"),
-            ("y / Y", "copy value / key"),
-            ("r", "reload"),
-            ("K", "tombstone for this key"),
-            ("g / G", "first message / follow newest"),
-        ],
-        Screen::Detail => &[
-            ("↑↓", "scroll"),
-            ("y / Y", "copy value / key"),
-            ("E", "edit & produce"),
-            ("p", "produce"),
-            ("K", "tombstone for this key"),
-            ("?", "help"),
-            ("esc", "back"),
-        ],
-        Screen::Groups => &[
-            ("↑↓", "move"),
-            ("⏎", "open"),
-            ("R", "reset offsets"),
-            ("/", "filter"),
-            ("r", "refresh"),
-            ("?", "help"),
-            ("q", "quit"),
-        ],
-        Screen::Brokers => &[
-            ("↑↓", "move"),
-            ("r", "refresh"),
-            ("?", "help"),
-            ("q", "quit"),
-        ],
-        Screen::GroupDetail => &[
-            ("↑↓", "move"),
-            ("R", "reset offsets"),
-            ("r", "refresh"),
-            ("?", "help"),
-            ("esc", "back"),
-        ],
+/// The keys bound to a command, as shown to the user: `↑↓` for movement,
+/// otherwise the keys joined with ` / `.
+fn shown_keys(state: &AppState, id: &str, all: bool) -> Option<String> {
+    let map = &state.keymap;
+    if id == "up" {
+        if let (Some(up), Some(down)) = (map.hint("up"), map.hint("down")) {
+            return Some(format!("{up}{down}"));
+        }
     }
+    let keys = map.keys(id);
+    if keys.is_empty() {
+        return None;
+    }
+    let shown: Vec<String> = if all {
+        keys.iter().map(ToString::to_string).collect()
+    } else {
+        vec![keys[0].to_string()]
+    };
+    Some(shown.join(" / "))
 }
 
 /// The tabs, with the screens each one covers.
@@ -155,50 +86,119 @@ fn active_tab(screen: Screen) -> &'static str {
 }
 
 fn render_help(frame: &mut Frame, state: &AppState) {
-    const EVERYWHERE: [(&str, &str); 4] = [
-        ("1-4", "topics, consumer groups, schemas, brokers"),
-        ("g / G", "first / last row"),
-        ("PgUp/PgDn", "page"),
-        ("ctrl-c", "quit from anywhere"),
-    ];
-    let keys = keys(state.screen);
-    let key_width = keys
-        .iter()
-        .chain(&EVERYWHERE)
-        .map(|(k, _)| k.chars().count())
-        .max()
-        .unwrap_or(4)
-        + 2;
-    let row = |(key, label): &(&str, &str)| {
-        Line::from(vec![
-            Span::styled(format!(" {key:<key_width$}"), theme::key_hint()),
-            Span::styled(label.to_string(), theme::text()),
-        ])
+    let screen = state.screen;
+    let rows = |everywhere: bool| -> Vec<(String, &'static str)> {
+        commands::on(screen)
+            .filter(|c| (c.scope == commands::Scope::Everywhere) == everywhere && c.id != "down")
+            .filter_map(|c| {
+                let label = if c.id == "up" { "Move" } else { c.title };
+                shown_keys(state, c.id, true).map(|keys| (keys, label))
+            })
+            .collect()
     };
-    let section = |name: &str| Line::styled(name.to_uppercase(), theme::header_row());
-    let mut lines = vec![section("This screen")];
-    lines.extend(keys.iter().map(row));
-    lines.push(Line::raw(""));
-    lines.push(section("Everywhere"));
-    lines.extend(EVERYWHERE.iter().map(row));
-    lines.push(Line::raw(""));
-    lines.push(Line::styled("Press any key to close", theme::faint()).centered());
+    let (this_screen, everywhere) = (rows(false), rows(true));
+    // Pairs and the tab keys share a row, so the overlay fits small terminals.
+    const MERGED: [(&[&str], &str); 3] = [
+        (&["page-up", "page-down"], "Page up / down"),
+        (&["top", "bottom"], "First / last row (follow newest)"),
+        (
+            &["topics", "groups", "schemas", "brokers"],
+            "Topics, groups, schemas, brokers",
+        ),
+    ];
+    let first_key = |id: &str| state.keymap.hint(id);
+    let mut everywhere: Vec<(String, &str)> = everywhere
+        .into_iter()
+        .filter(|(_, label)| {
+            !MERGED.iter().any(|(ids, _)| {
+                ids.iter()
+                    .any(|id| commands::find(id).is_some_and(|c| c.title == *label))
+            })
+        })
+        .collect();
+    for (ids, label) in MERGED {
+        let keys: Vec<String> = ids.iter().filter_map(|id| first_key(id)).collect();
+        if !keys.is_empty() {
+            everywhere.push((keys.join(" "), label));
+        }
+    }
+    everywhere.push(("ctrl-c".to_owned(), "Quit from anywhere"));
+    let column = |title: &str, rows: &[(String, &str)]| -> Vec<Line<'static>> {
+        let key_width = rows
+            .iter()
+            .map(|(k, _)| k.chars().count())
+            .max()
+            .unwrap_or(4)
+            + 2;
+        let mut lines = vec![Line::styled(title.to_uppercase(), theme::header_row())];
+        lines.extend(rows.iter().map(|(key, label)| {
+            Line::from(vec![
+                Span::styled(format!(" {key:<key_width$}"), theme::key_hint()),
+                Span::styled(label.to_string(), theme::text()),
+            ])
+        }));
+        lines
+    };
+    let left = column("This screen", &this_screen);
+    let right = column("Everywhere", &everywhere);
+    let footer = Line::styled(
+        "Press any key to close · rebind keys in the config's [keys] table",
+        theme::faint(),
+    )
+    .centered();
 
     let area = frame.area();
-    let width = (lines.iter().map(Line::width).max().unwrap_or(30) as u16 + 6).min(area.width);
-    let height = (lines.len() as u16 + 2).min(area.height);
-    let popup = centered(area, width, height);
-    frame.render_widget(Clear, popup);
-    frame.render_widget(
-        Paragraph::new(lines).style(theme::raised()).block(
-            Block::bordered()
-                .border_type(BorderType::Rounded)
-                .border_style(theme::border_focus())
-                .padding(Padding::horizontal(1))
-                .title(Line::styled(" Keys ", theme::title())),
-        ),
-        popup,
+    let width_of = |lines: &[Line]| lines.iter().map(Line::width).max().unwrap_or(0) as u16;
+    let (left_width, right_width) = (width_of(&left), width_of(&right));
+    // Side by side when they fit, else one under the other.
+    let side_by_side = left_width + right_width + 10 <= area.width;
+    let (width, body_height) = if side_by_side {
+        (
+            (left_width + right_width + 8).max(footer.width() as u16 + 4),
+            left.len().max(right.len()) as u16,
+        )
+    } else {
+        (
+            left_width.max(right_width).max(footer.width() as u16) + 4,
+            (left.len() + right.len() + 1) as u16,
+        )
+    };
+    let popup = centered(
+        area,
+        width.min(area.width),
+        (body_height + 4).min(area.height),
     );
+    frame.render_widget(Clear, popup);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(theme::border_focus())
+        .padding(Padding::horizontal(1))
+        .style(theme::raised())
+        .title(Line::styled(" Keys ", theme::title()));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    let [body, _, foot] = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    if side_by_side {
+        let [l, _, r] = Layout::horizontal([
+            Constraint::Length(left_width),
+            Constraint::Length(4),
+            Constraint::Min(0),
+        ])
+        .areas(body);
+        frame.render_widget(Paragraph::new(left), l);
+        frame.render_widget(Paragraph::new(right), r);
+    } else {
+        let mut lines = left;
+        lines.push(Line::raw(""));
+        lines.extend(right);
+        frame.render_widget(Paragraph::new(lines), body);
+    }
+    frame.render_widget(footer, foot);
 }
 
 pub(super) fn centered(area: Rect, width: u16, height: u16) -> Rect {
@@ -321,13 +321,30 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &AppState) {
     if let Some(toast) = toast {
         frame.render_widget(toast, right);
     }
-    // The common keys, as many as fit; ? lists them all.
-    let help = kit::key_hints(&[("?", "keys")]);
+    // The common keys, as many as fit; the help key always shows.
+    // The palette and help keys always show, at the end.
+    let mut help = Vec::new();
+    for (id, label) in [("palette", "commands"), ("help", "keys")] {
+        if let Some(key) = shown_keys(state, id, false) {
+            help.extend(kit::key_hints(&[(&key, label)]));
+        }
+    }
     let help_width: usize = help.iter().map(Span::width).sum();
     let mut spans = Vec::new();
     let mut used = 0;
-    for (key, label) in keys(state.screen).iter().filter(|(k, _)| *k != "?") {
-        let hint = kit::key_hints(&[(key, label)]);
+    // Top-level screens have nowhere to go back to.
+    let top_level = matches!(
+        state.screen,
+        Screen::Topics | Screen::Groups | Screen::Schemas | Screen::Brokers
+    );
+    let footer = commands::on(state.screen).filter(|c| {
+        c.footer && !matches!(c.id, "help" | "palette") && !(top_level && c.id == "back")
+    });
+    for command in footer {
+        let Some(key) = shown_keys(state, command.id, false) else {
+            continue;
+        };
+        let hint = kit::key_hints(&[(&key, command.label)]);
         let width: usize = hint.iter().map(Span::width).sum();
         if used + width + help_width > left.width as usize {
             break;

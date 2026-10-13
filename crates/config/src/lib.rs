@@ -48,8 +48,34 @@ pub struct Config {
     pub default_profile: Option<String>,
     /// Color theme: `dark`, `light` or `terminal` (16 colors). Detected when unset.
     pub theme: Option<String>,
+    /// Command name to key or keys, replacing that command's default keys.
+    #[serde(default, deserialize_with = "keys_table")]
+    pub keys: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     pub profiles: BTreeMap<String, Profile>,
+}
+
+/// `pause = "p"` or `pause = ["p", "space"]`.
+fn keys_table<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<BTreeMap<String, Vec<String>>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Keys {
+        One(String),
+        Many(Vec<String>),
+    }
+    let table = BTreeMap::<String, Keys>::deserialize(deserializer)?;
+    Ok(table
+        .into_iter()
+        .map(|(command, keys)| {
+            let keys = match keys {
+                Keys::One(key) => vec![key],
+                Keys::Many(keys) => keys,
+            };
+            (command, keys)
+        })
+        .collect())
 }
 
 #[derive(Debug, Clone, Deserialize)]

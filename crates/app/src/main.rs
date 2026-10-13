@@ -1,5 +1,4 @@
 mod editor;
-mod keymap;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -10,6 +9,7 @@ use crossterm::event::{Event as TermEvent, EventStream, KeyEventKind};
 use futures::StreamExt;
 use kaffy_config::{Config, Profile, SchemaRegistry};
 use kaffy_kafka::{Command, Worker};
+use kaffy_ui::keymap::Keymap;
 use kaffy_ui::theme::ThemeName;
 use kaffy_ui::{Action, AppState, Effect};
 use ratatui::DefaultTerminal;
@@ -51,9 +51,11 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let log_path = init_logging()?;
     tracing::info!(?args, "starting kaffy");
-    let theme = pick_theme(&args)?;
+    let ui_config = ui_config(&args)?;
+    let theme = pick_theme(&args, &ui_config)?;
     tracing::info!(?theme, "theme");
     kaffy_ui::theme::init(theme);
+    let keymap = Keymap::with_overrides(&ui_config.keys).map_err(anyhow::Error::msg)?;
 
     let (worker, state) = if args.demo {
         // The demo cluster is fake, so it accepts writes: try produce, replay and resets.
@@ -72,15 +74,26 @@ async fn main() -> Result<()> {
         )
     };
 
+    let mut state = state;
+    state.keymap = keymap;
     let mut terminal = ratatui::init();
     let result = App::new(state, worker).run(&mut terminal).await;
     ratatui::restore();
     result.with_context(|| format!("kaffy failed; see the log at {}", log_path.display()))
 }
 
+/// The config file's UI settings (theme and keys), which apply to `--demo` and
+/// `--bootstrap` too. No file means the defaults.
+fn ui_config(args: &Args) -> Result<Config> {
+    match args.config.clone().or_else(Config::default_path) {
+        Some(path) if path.exists() => Ok(Config::load(&path)?),
+        _ => Ok(Config::default()),
+    }
+}
+
 /// `--theme`, then `$KAFFY_THEME`, then the config file's `theme`, else a guess
 /// from the terminal.
-fn pick_theme(args: &Args) -> Result<ThemeName> {
+fn pick_theme(args: &Args, config: &Config) -> Result<ThemeName> {
     let parse = |name: &str, source: &str| {
         ThemeName::parse(name).with_context(|| {
             format!("unknown theme `{name}` in {source}; use dark, light or terminal")
@@ -92,14 +105,10 @@ fn pick_theme(args: &Args) -> Result<ThemeName> {
     if let Ok(name) = std::env::var("KAFFY_THEME") {
         return parse(&name, "$KAFFY_THEME");
     }
-    let path = args.config.clone().or_else(Config::default_path);
-    // A broken config is reported when the profile is loaded; here it just means no theme.
-    if let Some(Ok(config)) = path.filter(|p| p.exists()).map(|p| Config::load(&p)) {
-        if let Some(name) = &config.theme {
-            return parse(name, "the config file");
-        }
+    match &config.theme {
+        Some(name) => parse(name, "the config file"),
+        None => Ok(ThemeName::detect()),
     }
-    Ok(ThemeName::detect())
 }
 
 fn resolve_profile(args: &Args) -> Result<Profile> {
@@ -201,7 +210,7 @@ impl App {
                 }
                 event = terminal_events.next() => match event {
                     Some(Ok(TermEvent::Key(key))) if key.kind == KeyEventKind::Press => {
-                        if let Some(action) = keymap::map_key(&self.state, key) {
+                        if let Some(action) = self.state.keymap.action(&self.state, key) {
                             self.dispatch(action);
                         }
                         dirty = true;

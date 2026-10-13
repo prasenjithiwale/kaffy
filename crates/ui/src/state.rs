@@ -19,6 +19,8 @@ use crate::dialog::{ChoicePurpose, Confirm, Dialog};
 use crate::export::{self, ExportFormat};
 use crate::filter::{Filter, Subject};
 use crate::groups::{GroupDetailView, GroupsView};
+use crate::keymap::Keymap;
+use crate::palette::{self, Entry, Palette, PaletteKey, Target};
 use crate::schemas::{self, SchemasView, SubjectView};
 use crate::{fmt, template};
 
@@ -196,6 +198,10 @@ pub enum Action {
     Tombstone,
     ShowSchemas,
     ShowBrokers,
+    OpenPalette,
+    Palette(PaletteKey),
+    /// Open a topic, group or subject by name.
+    GoTo(Target),
     /// Show the change from the previous schema version.
     ToggleDiff,
     /// Edit the latest schema and register the result as a new version.
@@ -464,6 +470,8 @@ pub struct AppState {
     pub schemas: SchemasView,
     pub subject: Option<SubjectView>,
     pub brokers: BrokersView,
+    pub keymap: Keymap,
+    pub palette: Option<Palette>,
     pub dialog: Option<Dialog>,
     pub show_help: bool,
     wizard: Option<Wizard>,
@@ -494,6 +502,8 @@ impl AppState {
             schemas: SchemasView::default(),
             subject: None,
             brokers: BrokersView::default(),
+            keymap: Keymap::default(),
+            palette: None,
             dialog: None,
             show_help: false,
             wizard: None,
@@ -828,6 +838,13 @@ impl AppState {
             Action::ShowGroups => self.show_groups(),
             Action::ShowSchemas => self.show_schemas(),
             Action::ShowBrokers => self.show_brokers(),
+            Action::OpenPalette => {
+                self.show_help = false;
+                self.palette = Some(Palette::default());
+                None
+            }
+            Action::Palette(key) => self.update_palette(key),
+            Action::GoTo(target) => self.go_to(target),
             Action::BeginInput(kind) => {
                 let current = match kind {
                     InputKind::Filter => self.filter().to_owned(),
@@ -994,6 +1011,76 @@ impl AppState {
         Some(match leave {
             Some(stop) => Effect::Many(vec![stop, list]),
             None => list,
+        })
+    }
+
+    fn update_palette(&mut self, key: PaletteKey) -> Option<Effect> {
+        let palette = self.palette.as_mut()?;
+        match key {
+            PaletteKey::Char(c) => {
+                palette.query.push(c);
+                palette.selected = 0;
+            }
+            PaletteKey::Backspace => {
+                palette.query.pop();
+                palette.selected = 0;
+            }
+            PaletteKey::Up => palette.selected = palette.selected.saturating_sub(1),
+            PaletteKey::Down => palette.selected += 1,
+            PaletteKey::Cancel => self.palette = None,
+            PaletteKey::Submit => {
+                let palette = self.palette.take()?;
+                let chosen = palette::matches(self, &palette.query)
+                    .into_iter()
+                    .nth(palette.selected)?;
+                return match chosen.entry {
+                    Entry::Command(_) => {
+                        let command = chosen.entry.command()?;
+                        self.update((command.action)())
+                    }
+                    Entry::Go(target) => self.update(Action::GoTo(target)),
+                };
+            }
+        }
+        let len = palette::matches(self, &self.palette.as_ref()?.query)
+            .len()
+            .min(palette::MAX_RESULTS);
+        let palette = self.palette.as_mut()?;
+        palette.selected = palette.selected.min(len.saturating_sub(1));
+        None
+    }
+
+    /// Leaves the current screen and opens `target`.
+    fn go_to(&mut self, target: Target) -> Option<Effect> {
+        let leave = match self.screen {
+            Screen::Messages | Screen::Detail => self.leave_tail(Screen::Topics),
+            _ => None,
+        };
+        self.topic_config = None;
+        self.group_detail = None;
+        self.subject = None;
+        let open = match target {
+            Target::Topic(name) => {
+                // Keep the list in step, so going back lands on this topic.
+                self.topic_filter.clear();
+                if let Some(i) = self.visible_topics().iter().position(|t| t.name == name) {
+                    self.topic_table.select(Some(i));
+                }
+                self.screen = Screen::Messages;
+                self.start_tail(name, DEFAULT_START)
+            }
+            Target::Group(name) => {
+                self.groups.filter.clear();
+                self.open_group(name)
+            }
+            Target::Subject(name) => {
+                self.schemas.filter.clear();
+                self.open_subject(name)
+            }
+        };
+        Some(match leave {
+            Some(stop) => Effect::Many(vec![stop, open]),
+            None => open,
         })
     }
 

@@ -240,3 +240,85 @@ fn healthy_cluster_says_so() {
     assert!(screen.contains("healthy"));
     assert!(screen.contains("Every partition has a leader"));
 }
+
+#[test]
+fn palette_finds_and_opens_a_topic() {
+    use kaffy_ui::palette::PaletteKey;
+    let mut state = AppState::new("local", true, false);
+    state.on_event(Event::Metadata {
+        brokers: 1,
+        topics: vec![
+            topic("orders", vec![1, 2, 3]),
+            topic("payments", vec![1, 2, 3]),
+        ],
+    });
+    state.update(Action::ShowGroups);
+    state.update(Action::OpenPalette);
+    let screen = draw_sized(&mut state, 110, 24);
+    assert!(screen.contains("Go to"));
+    assert!(
+        screen.contains("Reset the group's offsets"),
+        "this screen's commands"
+    );
+
+    for c in "pay".chars() {
+        state.update(Action::Palette(PaletteKey::Char(c)));
+    }
+    let screen = draw_sized(&mut state, 110, 24);
+    assert!(screen.contains("payments"));
+    assert!(screen.contains("topic"));
+
+    let effect = state.update(Action::Palette(PaletteKey::Submit));
+    assert!(state.palette.is_none());
+    assert_eq!(state.screen, Screen::Messages);
+    assert!(
+        matches!(effect, Some(Effect::Kafka(Command::Tail { ref topic, .. })) if topic == "payments"),
+        "{effect:?}"
+    );
+}
+
+#[test]
+fn rebound_keys_show_in_the_footer_and_help() {
+    let overrides = std::collections::BTreeMap::from([
+        ("new-topic".to_owned(), vec!["N".to_owned()]),
+        ("config".to_owned(), vec![]),
+    ]);
+    let mut state = AppState::new("local", false, false);
+    state.keymap = kaffy_ui::keymap::Keymap::with_overrides(&overrides).unwrap();
+    state.on_event(Event::Metadata {
+        brokers: 1,
+        topics: vec![topic("orders", vec![1, 2, 3])],
+    });
+    let footer = draw_sized(&mut state, 160, 20)
+        .lines()
+        .last()
+        .unwrap()
+        .to_owned();
+    assert!(footer.contains(" N  new topic"), "{footer}");
+    assert!(
+        !footer.contains("config"),
+        "unbound commands leave the footer: {footer}"
+    );
+
+    state.update(Action::ToggleHelp);
+    let help = draw_sized(&mut state, 110, 30);
+    assert!(help.contains("Create a topic"));
+    assert!(!help.contains("Show the topic's config"));
+}
+
+#[test]
+fn messages_footer_follows_rebound_pause() {
+    let mut state = state_with_messages();
+    let overrides = std::collections::BTreeMap::from([("pause".to_owned(), vec!["p".to_owned()])]);
+    state.keymap = kaffy_ui::keymap::Keymap::with_overrides(&overrides).unwrap();
+    let footer = draw_sized(&mut state, 160, 20)
+        .lines()
+        .last()
+        .unwrap()
+        .to_owned();
+    assert!(footer.contains(" p  pause"), "{footer}");
+    assert!(
+        !footer.contains("p  produce"),
+        "produce lost p and has no other key: {footer}"
+    );
+}

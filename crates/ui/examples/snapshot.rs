@@ -12,6 +12,7 @@ use std::fmt::Write as _;
 use std::time::Duration;
 
 use kaffy_kafka::{Command, Worker};
+use kaffy_ui::palette::PaletteKey;
 use kaffy_ui::theme::ThemeName;
 use kaffy_ui::{Action, AppState, Effect, InputKind};
 use ratatui::Terminal;
@@ -152,6 +153,17 @@ async fn main() {
     )
     .await;
     screens.push(("help", draw(&mut state)));
+
+    act(
+        &mut worker,
+        &mut state,
+        &[Action::ToggleHelp, Action::OpenPalette],
+    )
+    .await;
+    for c in "or".chars() {
+        state.update(Action::Palette(PaletteKey::Char(c)));
+    }
+    screens.push(("palette", draw(&mut state)));
 
     for (name, html) in screens {
         println!("<pre class=\"tui\" data-screen=\"{name}\">{html}</pre>");

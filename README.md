@@ -76,6 +76,23 @@ macOS Terminal, it uses `terminal`. Choose one with `--theme dark|light|terminal
 Press `?` on any screen for its keys. `1`, `2`, `3` and `4` switch between topics, consumer groups, schemas
 and brokers.
 
+**Command palette:** `:` or `Ctrl-P` opens a search box. Type part of a command ("reset", "tomb") to run it,
+or part of a topic, consumer group or subject name to jump straight to it. Matching is fuzzy: `sr` finds
+`sensor-readings`.
+
+**Rebinding keys:** give a command new keys in the config's `[keys]` table. They replace that command's
+defaults, an empty list unbinds it, and a key you take is removed from any other command on the same screens.
+The help (`?`) and footer show your keys. Command names are listed in `crates/ui/src/commands.rs`; the common
+ones are `pause`, `filter`, `produce`, `refresh`, `back`, `quit`, `palette` and `seek-beginning`.
+
+```toml
+[keys]
+pause = "p"                  # instead of space
+produce = "P"
+palette = ["ctrl-k", ":"]
+quit = []                    # unbound; ctrl-c always quits
+```
+
 | Screen | Keys |
 |---|---|
 | everywhere | `↑↓`/`jk` move, `PgUp`/`PgDn`/`Ctrl-u`/`Ctrl-d` page, `g`/`G` top/bottom, `esc` back (clears an active filter first), `?` help, `q`/`Ctrl-c` quit |
