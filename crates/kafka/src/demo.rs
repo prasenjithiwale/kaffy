@@ -5,6 +5,11 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use std::sync::OnceLock;
+
+use apache_avro::types::Value as AvroValue;
+use apache_avro::writer::datum::GenericDatumWriter;
+use kaffy_schema::{AvroSchema, Decoded};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -147,7 +152,10 @@ async fn run_tail(
             let ts = started_ms - (HISTORY - offset) * HISTORY_STEP_MS;
             let record = record(topic_idx, partition, offset, ts);
             if events
-                .send(Event::Record { session, record })
+                .send(Event::Record {
+                    session,
+                    record: Box::new(record),
+                })
                 .await
                 .is_err()
             {
@@ -168,7 +176,7 @@ async fn run_tail(
                 let offset = next_offset[partition as usize];
                 next_offset[partition as usize] += 1;
                 let record = record(topic_idx, partition, offset, now_ms());
-                if events.send(Event::Record { session, record }).await.is_err() {
+                if events.send(Event::Record { session, record: Box::new(record) }).await.is_err() {
                     return;
                 }
             }
@@ -229,15 +237,19 @@ fn record(topic_idx: usize, partition: i32, offset: i64, timestamp_ms: i64) -> R
             )
         }
         "sensor-readings" => {
-            // Confluent wire format: magic byte, schema id 7, then an opaque body.
-            let mut value = vec![0, 0, 0, 0, 7];
-            value.extend_from_slice(&h.to_be_bytes());
-            value.extend_from_slice(&(offset as u32).to_be_bytes());
-            (
-                Some(format!("sensor-{}", h % 16).into_bytes()),
-                Some(value),
-                Vec::new(),
-            )
+            let sensor = format!("sensor-{}", h % 16);
+            let value = sensor_reading(&sensor, h, offset);
+            return Record {
+                topic: topic.to_owned(),
+                partition,
+                offset,
+                timestamp_ms: Some(timestamp_ms),
+                key: Some(sensor.into_bytes()),
+                value_decoded: Some(decode_sensor_reading(&value)),
+                value: Some(value),
+                headers: Vec::new(),
+                key_decoded: None,
+            };
         }
         _ => (
             Some(h.to_be_bytes().to_vec()),
@@ -254,6 +266,83 @@ fn record(topic_idx: usize, partition: i32, offset: i64, timestamp_ms: i64) -> R
         key,
         value,
         headers,
+        key_decoded: None,
+        value_decoded: None,
+    }
+}
+
+/// Avro schema of `sensor-readings`, registered as id 7 in the pretend registry.
+const SENSOR_SCHEMA: &str = r#"{
+    "type": "record", "name": "Reading", "namespace": "demo.sensors",
+    "fields": [
+        {"name": "sensor", "type": "string"},
+        {"name": "celsius", "type": "double"},
+        {"name": "battery", "type": ["null", "int"], "default": null},
+        {"name": "state", "type": {"type": "enum", "name": "State", "symbols": ["OK", "WARN", "FAIL"]}}
+    ]
+}"#;
+const SENSOR_SCHEMA_ID: u32 = 7;
+/// Every 40th reading claims a schema id the pretend registry doesn't know.
+const UNKNOWN_SCHEMA_ID: u32 = 8;
+
+fn sensor_schema() -> &'static AvroSchema {
+    static SCHEMA: OnceLock<AvroSchema> = OnceLock::new();
+    SCHEMA.get_or_init(|| AvroSchema::parse_str(SENSOR_SCHEMA).expect("valid demo schema"))
+}
+
+/// An Avro-encoded reading in the Confluent wire format.
+fn sensor_reading(sensor: &str, h: u64, offset: i64) -> Vec<u8> {
+    // Mostly OK, some WARN, the occasional FAIL.
+    let state: u32 = match h % 20 {
+        0 => 2,
+        1..=3 => 1,
+        _ => 0,
+    };
+    let battery = if h % 7 == 0 {
+        AvroValue::Union(0, Box::new(AvroValue::Null))
+    } else {
+        AvroValue::Union(1, Box::new(AvroValue::Int((h % 100) as i32)))
+    };
+    let reading = AvroValue::Record(vec![
+        ("sensor".into(), AvroValue::String(sensor.to_owned())),
+        (
+            "celsius".into(),
+            AvroValue::Double(15.0 + (h % 200) as f64 / 10.0),
+        ),
+        ("battery".into(), battery),
+        (
+            "state".into(),
+            AvroValue::Enum(state, ["OK", "WARN", "FAIL"][state as usize].into()),
+        ),
+    ]);
+    let body = GenericDatumWriter::builder(sensor_schema())
+        .build()
+        .and_then(|writer| writer.write_value_to_vec(reading))
+        .expect("demo reading matches its schema");
+    let schema_id = if offset % 40 == 39 {
+        UNKNOWN_SCHEMA_ID
+    } else {
+        SENSOR_SCHEMA_ID
+    };
+    let mut bytes = vec![0];
+    bytes.extend_from_slice(&schema_id.to_be_bytes());
+    bytes.extend_from_slice(&body);
+    bytes
+}
+
+/// What a registry holding only schema 7 would answer.
+fn decode_sensor_reading(bytes: &[u8]) -> Decoded {
+    let decoded = kaffy_schema::decode_avro(sensor_schema(), bytes).expect("wire format");
+    if decoded.schema_id == SENSOR_SCHEMA_ID {
+        return decoded;
+    }
+    Decoded {
+        schema_id: decoded.schema_id,
+        schema_type: None,
+        result: Err(format!(
+            "schema registry: 404 Not Found: Schema {} not found",
+            decoded.schema_id
+        )),
     }
 }
 

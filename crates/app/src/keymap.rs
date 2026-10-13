@@ -3,6 +3,10 @@ use kaffy_kafka::StartAt;
 use kaffy_ui::{Action, AppState, InputKind, Screen};
 
 pub fn map_key(state: &AppState, key: KeyEvent) -> Option<Action> {
+    // Alt+key would otherwise act as the plain key; nothing is bound to Alt yet.
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        return None;
+    }
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         return match key.code {
             KeyCode::Char('c') => Some(Action::Quit),

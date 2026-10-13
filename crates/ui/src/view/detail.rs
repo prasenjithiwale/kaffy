@@ -1,4 +1,3 @@
-use kaffy_schema::Format;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -30,18 +29,18 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut AppState) {
         ),
     ];
 
-    match (&detail.key_text, detail.key_format) {
-        (Some(text), Some(format)) => {
-            let mut key_lines = text.lines();
+    match &detail.key {
+        Some(key) => {
+            let mut key_lines = key.text.lines();
             let first = key_lines.next().unwrap_or_default().to_owned();
             lines.push(Line::from(vec![
                 label("Key"),
                 Span::raw(first),
-                Span::styled(format!("  ({})", format.label()), theme::dim()),
+                Span::styled(format!("  ({})", key.label), theme::dim()),
             ]));
             lines.extend(key_lines.map(|l| indented(l.to_owned())));
         }
-        _ => lines.push(Line::from(vec![
+        None => lines.push(Line::from(vec![
             label("Key"),
             Span::styled("∅ null", theme::dim()),
         ])),
@@ -57,7 +56,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut AppState) {
             let value = header
                 .value
                 .as_deref()
-                .map(|v| kaffy_schema::preview(v, 200))
+                .map(|v| kaffy_schema::preview(v, None, 200))
                 .unwrap_or_else(|| "∅".to_owned());
             let first = if i == 0 {
                 label("Headers")
@@ -74,24 +73,21 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut AppState) {
     }
 
     lines.push(Line::raw(""));
-    match (&detail.value_text, detail.value_format) {
-        (Some(text), Some(format)) => {
+    match &detail.value {
+        Some(value) => {
             let size = record.value.as_ref().map_or(0, Vec::len);
             lines.push(Line::from(vec![
                 Span::styled("Value", theme::title()),
-                Span::styled(
-                    format!("  ({}, {size} bytes)", format.label()),
-                    theme::dim(),
-                ),
+                Span::styled(format!("  ({}, {size} bytes)", value.label), theme::dim()),
             ]));
             lines.push(Line::raw(""));
-            if format == Format::Json {
-                lines.extend(text.lines().map(highlight_json));
+            if value.json {
+                lines.extend(value.text.lines().map(highlight_json));
             } else {
-                lines.extend(text.lines().map(|l| Line::raw(l.to_owned())));
+                lines.extend(value.text.lines().map(|l| Line::raw(l.to_owned())));
             }
         }
-        _ => lines.push(Line::from(vec![
+        None => lines.push(Line::from(vec![
             Span::styled("Value", theme::title()),
             Span::styled("  ∅ null (tombstone)", theme::dim()),
         ])),

@@ -8,6 +8,7 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use kaffy_kafka::{Command, Event, Record, StartAt, TopicInfo};
+use kaffy_schema::Rendered;
 use ratatui::widgets::TableState;
 
 use crate::filter::{Filter, Subject};
@@ -114,12 +115,12 @@ impl Row {
         let key_preview = record
             .key
             .as_deref()
-            .map(|k| kaffy_schema::preview(k, PREVIEW_CHARS))
+            .map(|k| kaffy_schema::preview(k, record.key_decoded.as_ref(), PREVIEW_CHARS))
             .unwrap_or_default();
         let value_preview = record
             .value
             .as_deref()
-            .map(|v| kaffy_schema::preview(v, PREVIEW_CHARS))
+            .map(|v| kaffy_schema::preview(v, record.value_decoded.as_ref(), PREVIEW_CHARS))
             .unwrap_or_default();
         let lossy = |bytes: Option<&[u8]>| {
             bytes
@@ -133,8 +134,16 @@ impl Row {
             .collect::<Vec<_>>()
             .join("\n");
         Self {
-            key_text: lossy(record.key.as_deref()),
-            value_text: lossy(record.value.as_deref()),
+            key_text: record
+                .key
+                .as_deref()
+                .map(|k| search_text(k, record.key_decoded.as_ref()))
+                .unwrap_or_default(),
+            value_text: record
+                .value
+                .as_deref()
+                .map(|v| search_text(v, record.value_decoded.as_ref()))
+                .unwrap_or_default(),
             headers_text,
             record,
             key_preview,
@@ -270,22 +279,24 @@ impl TailView {
 #[derive(Debug, Clone)]
 pub struct DetailView {
     pub record: Record,
-    pub key_format: Option<kaffy_schema::Format>,
-    pub key_text: Option<String>,
-    pub value_format: Option<kaffy_schema::Format>,
-    pub value_text: Option<String>,
+    pub key: Option<Rendered>,
+    pub value: Option<Rendered>,
     pub scroll: u16,
 }
 
 impl DetailView {
     fn new(record: Record) -> Self {
-        let key = record.key.as_deref().map(kaffy_schema::render);
-        let value = record.value.as_deref().map(kaffy_schema::render);
+        let key = record
+            .key
+            .as_deref()
+            .map(|k| kaffy_schema::render(k, record.key_decoded.as_ref()));
+        let value = record
+            .value
+            .as_deref()
+            .map(|v| kaffy_schema::render(v, record.value_decoded.as_ref()));
         Self {
-            key_format: key.as_ref().map(|(f, _)| *f),
-            key_text: key.map(|(_, t)| t),
-            value_format: value.as_ref().map(|(f, _)| *f),
-            value_text: value.map(|(_, t)| t),
+            key,
+            value,
             record,
             scroll: 0,
         }
@@ -372,7 +383,7 @@ impl AppState {
             }
             Event::Record { session, record } => {
                 if let Some(tail) = self.tail.as_mut().filter(|t| t.session == session) {
-                    tail.push(record);
+                    tail.push(*record);
                 }
             }
             Event::Error(message) => self.flash_error(message),
@@ -609,15 +620,38 @@ impl AppState {
     }
 }
 
+/// What the filter searches: decoded JSON, or for payloads that failed to
+/// decode, the same "schema N not decoded" wording the table shows plus the error.
+fn search_text(bytes: &[u8], decoded: Option<&kaffy_schema::Decoded>) -> String {
+    match decoded {
+        Some(kaffy_schema::Decoded {
+            schema_id,
+            result: Err(error),
+            ..
+        }) => format!("schema {schema_id} not decoded: {error}"),
+        _ => kaffy_schema::plain_text(bytes, decoded),
+    }
+}
+
 fn copy(record: &Record, key: bool) -> Option<Effect> {
-    let (what, bytes) = if key {
-        ("key", record.key.as_deref())
+    let (what, bytes, decoded) = if key {
+        ("key", record.key.as_deref(), record.key_decoded.as_ref())
     } else {
-        ("value", record.value.as_deref())
+        (
+            "value",
+            record.value.as_deref(),
+            record.value_decoded.as_ref(),
+        )
     };
     let bytes = bytes?;
-    let text = match kaffy_schema::detect(bytes) {
-        kaffy_schema::Format::Json | kaffy_schema::Format::Text => {
+    let text = match (decoded, kaffy_schema::detect(bytes)) {
+        (
+            Some(kaffy_schema::Decoded {
+                result: Ok(value), ..
+            }),
+            _,
+        ) => serde_json::to_string_pretty(value).expect("a Value always serializes"),
+        (None, kaffy_schema::Format::Json | kaffy_schema::Format::Text) => {
             String::from_utf8_lossy(bytes).into_owned()
         }
         _ => kaffy_schema::hex_dump(bytes),
@@ -651,6 +685,7 @@ mod tests {
             key: Some(b"k".to_vec()),
             value: Some(value.as_bytes().to_vec()),
             headers: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -696,11 +731,11 @@ mod tests {
         };
         state.on_event(Event::Record {
             session: first,
-            record: record(1, "old"),
+            record: Box::new(record(1, "old")),
         });
         state.on_event(Event::Record {
             session: second,
-            record: record(0, "new"),
+            record: Box::new(record(0, "new")),
         });
         let tail = state.tail.as_ref().unwrap();
         assert_eq!(tail.rows.len(), 1);
@@ -714,7 +749,7 @@ mod tests {
         for i in 0..5 {
             state.on_event(Event::Record {
                 session,
-                record: record(i, "x"),
+                record: Box::new(record(i, "x")),
             });
         }
         state.update(Action::Up);
@@ -725,7 +760,7 @@ mod tests {
         // New records don't move a pinned selection.
         state.on_event(Event::Record {
             session,
-            record: record(5, "x"),
+            record: Box::new(record(5, "x")),
         });
         assert_eq!(
             state
@@ -760,7 +795,7 @@ mod tests {
         for i in 0..(BUFFER_CAPACITY as i64 + 10) {
             state.on_event(Event::Record {
                 session,
-                record: record(i, "x"),
+                record: Box::new(record(i, "x")),
             });
         }
         let tail = state.tail.as_ref().unwrap();
@@ -775,11 +810,11 @@ mod tests {
         let session = open_orders(&mut state);
         state.on_event(Event::Record {
             session,
-            record: record(0, r#"{"status":"PAID"}"#),
+            record: Box::new(record(0, r#"{"status":"PAID"}"#)),
         });
         state.on_event(Event::Record {
             session,
-            record: record(1, r#"{"status":"SHIPPED"}"#),
+            record: Box::new(record(1, r#"{"status":"SHIPPED"}"#)),
         });
         state.update(Action::BeginInput(InputKind::Filter));
         for c in "paid".chars() {
@@ -794,6 +829,46 @@ mod tests {
             state.update(Action::Back),
             Some(Effect::Kafka(Command::StopTail))
         );
+    }
+
+    #[test]
+    fn filter_searches_decoded_payloads() {
+        let mut state = with_topics();
+        let session = open_orders(&mut state);
+        let decoded = |result| kaffy_schema::Decoded {
+            schema_id: 7,
+            schema_type: Some(kaffy_schema::SchemaType::Avro),
+            result,
+        };
+        let avro = |offset, result| Record {
+            topic: "orders".to_owned(),
+            offset,
+            value: Some(vec![0, 0, 0, 0, 7, 2]),
+            value_decoded: Some(decoded(result)),
+            ..Default::default()
+        };
+        state.on_event(Event::Record {
+            session,
+            record: Box::new(avro(0, Ok(serde_json::json!({"status": "PAID"})))),
+        });
+        state.on_event(Event::Record {
+            session,
+            record: Box::new(avro(1, Err("schema registry: 404 Not Found".to_owned()))),
+        });
+        let visible_for = |state: &mut AppState, filter: &str| {
+            state.update(Action::BeginInput(InputKind::Filter));
+            for _ in 0..40 {
+                state.update(Action::InputBackspace);
+            }
+            for c in filter.chars() {
+                state.update(Action::InputChar(c));
+            }
+            state.update(Action::InputSubmit);
+            state.tail.as_ref().unwrap().visible()
+        };
+        assert_eq!(visible_for(&mut state, r#"~"status":"PAID""#), vec![0]);
+        assert_eq!(visible_for(&mut state, "not decoded"), vec![1]);
+        assert_eq!(visible_for(&mut state, "404"), vec![1]);
     }
 
     #[test]

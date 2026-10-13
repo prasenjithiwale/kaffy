@@ -30,6 +30,7 @@ fn record(offset: i64, value: Option<&str>) -> Record {
             key: "trace-id".to_owned(),
             value: Some(b"abc123".to_vec()),
         }],
+        ..Default::default()
     }
 }
 
@@ -73,7 +74,7 @@ fn state_with_messages() -> AppState {
             (i % 10 != 9).then(|| format!(r#"{{"order":{i},"status":"PAID","amount":12.5}}"#));
         state.on_event(Event::Record {
             session,
-            record: record(i, value.as_deref()),
+            record: Box::new(record(i, value.as_deref())),
         });
     }
     state

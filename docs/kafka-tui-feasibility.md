@@ -127,14 +127,14 @@ kafka-tui/
 Estimates are rough, for one developer working part-time.
 
 ### Phase 1: MVP (~4–6 weeks)
-- [ ] Config file with cluster profiles (PLAINTEXT, SASL, SSL)
-- [ ] Topic list with metadata
-- [ ] Live tail with pause/resume
-- [ ] Seek: beginning, end, offset, timestamp
-- [ ] JSON and Avro (via SR) decoding
-- [ ] Filters: key, value contains / regex, partition, time range
-- [ ] Message detail pane with syntax highlighting
-- [ ] Copy key/value to clipboard
+- [x] Config file with cluster profiles (PLAINTEXT, SASL, SSL)
+- [x] Topic list with metadata
+- [x] Live tail with pause/resume
+- [x] Seek: beginning, end, offset, timestamp
+- [x] JSON and Avro (via SR) decoding (tested against a mock registry; not yet against Confluent SR)
+- [x] Filters: key, value contains / regex, partition, time range
+- [x] Message detail pane with syntax highlighting
+- [x] Copy key/value to clipboard
 
 ### Phase 2: Operations (~4 weeks)
 - [ ] Consumer groups list

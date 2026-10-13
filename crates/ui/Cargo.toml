@@ -11,3 +11,4 @@ kaffy-schema.workspace = true
 chrono.workspace = true
 ratatui.workspace = true
 regex.workspace = true
+serde_json.workspace = true

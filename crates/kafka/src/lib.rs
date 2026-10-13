@@ -11,6 +11,7 @@ use tokio::sync::mpsc;
 
 pub use client::spawn;
 pub use demo::spawn_demo;
+pub use kaffy_schema::Decoded;
 
 /// Capacity of the event channel. When the UI falls behind, the consumer task
 /// waits instead of buffering without bound.
@@ -22,6 +23,8 @@ pub enum Error {
     Config(#[from] kaffy_config::ConfigError),
     #[error("kafka client: {0}")]
     Kafka(#[from] rdkafka::error::KafkaError),
+    #[error("{0}")]
+    SchemaRegistry(String),
 }
 
 pub struct Worker {
@@ -69,7 +72,8 @@ pub enum Event {
     },
     Record {
         session: u64,
-        record: Record,
+        /// Boxed: records are much larger than the other events.
+        record: Box<Record>,
     },
     Error(String),
 }
@@ -109,7 +113,7 @@ pub struct PartitionInfo {
     pub isr: Vec<i32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Record {
     pub topic: String,
     pub partition: i32,
@@ -118,6 +122,10 @@ pub struct Record {
     pub key: Option<Vec<u8>>,
     pub value: Option<Vec<u8>>,
     pub headers: Vec<Header>,
+    /// Set when the key or value is in the Schema Registry wire format and a
+    /// registry is configured.
+    pub key_decoded: Option<Decoded>,
+    pub value_decoded: Option<Decoded>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -9,6 +9,7 @@ See [docs/kafka-tui-feasibility.md](docs/kafka-tui-feasibility.md) for scope and
 cargo run -- --demo                       # fake cluster, no broker needed
 cargo run -- --bootstrap localhost:9092   # plaintext broker, no config file
 cargo run -- --profile staging            # profile from ~/.config/kaffy/config.toml
+cargo run -- --bootstrap localhost:9092 --schema-registry http://localhost:8081
 ```
 
 The first build compiles librdkafka and OpenSSL from source (needs `cmake`), which takes a few minutes.
@@ -19,6 +20,15 @@ Logs are written to `~/Library/Caches/kaffy/kaffy.log` on macOS (`~/.cache/kaffy
 Copy [config.example.toml](config.example.toml) to `~/.config/kaffy/config.toml`, or pass `--config <path>` / set `$KAFFY_CONFIG`.
 Passwords are never stored in the file: `sasl.password_env` names an environment variable to read them from.
 Profiles are read-only unless `read_only = false`.
+
+### Schema Registry
+
+Payloads in the Confluent wire format (magic byte + schema id) are decoded through a Confluent-compatible
+Schema Registry, set per profile with `schema_registry = { url = "...", username = "...", password_env = "..." }`
+or with `--schema-registry <url>`. Avro is decoded to JSON (including schemas that reference other subjects);
+JSON Schema payloads are shown as JSON; Protobuf decoding is not implemented yet.
+Schemas are cached per id, and the filter and clipboard work on the decoded JSON.
+Without a registry, such payloads are shown as a hex dump labelled with their schema id.
 
 ## Keys
 
@@ -83,4 +93,7 @@ Broker data lives in `/opt/homebrew/var/lib/kraft-combined-logs`, logs in `/opt/
 ```sh
 cargo test --workspace
 cargo clippy --workspace --all-targets
+cargo test -p kaffy-kafka --test local_broker -- --ignored   # end-to-end, needs a broker on localhost:9092
 ```
+
+Dev builds skip debug info for dependencies (see `Cargo.toml`) to keep `target/` small.

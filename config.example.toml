@@ -13,7 +13,7 @@ bootstrap_servers = "broker-1.staging:9094,broker-2.staging:9094"
 security_protocol = "sasl_ssl"          # plaintext | ssl | sasl_plaintext | sasl_ssl
 sasl = { mechanism = "SCRAM-SHA-512", username = "svc-kaffy", password_env = "KAFFY_STAGING_PASSWORD" }
 tls = { ca_location = "/etc/ssl/certs/staging-ca.pem" }
-schema_registry_url = "https://schema-registry.staging:8081"
+schema_registry = { url = "https://schema-registry.staging:8081", username = "sr-key", password_env = "KAFFY_STAGING_SR_SECRET" }
 
 [profiles.prod-mtls]
 bootstrap_servers = "broker-1.prod:9093"

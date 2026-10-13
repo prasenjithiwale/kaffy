@@ -67,7 +67,7 @@ pub struct Profile {
     /// Marks a production cluster: destructive operations need typed confirmation.
     #[serde(default)]
     pub prod: bool,
-    pub schema_registry_url: Option<String>,
+    pub schema_registry: Option<SchemaRegistry>,
     /// Raw librdkafka properties, applied last so they can override anything above.
     #[serde(default)]
     pub librdkafka: BTreeMap<String, String>,
@@ -140,6 +140,23 @@ pub struct Tls {
     pub key_password_env: Option<String>,
 }
 
+/// Confluent-compatible Schema Registry, used to decode Avro payloads.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SchemaRegistry {
+    pub url: String,
+    /// Basic auth (Confluent Cloud: API key and secret).
+    pub username: Option<String>,
+    pub password_env: Option<String>,
+}
+
+/// A Schema Registry with its secret resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedSchemaRegistry {
+    pub url: String,
+    pub basic_auth: Option<(String, String)>,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -198,7 +215,7 @@ impl Profile {
             tls: None,
             read_only: true,
             prod: false,
-            schema_registry_url: None,
+            schema_registry: None,
             librdkafka: BTreeMap::new(),
         }
     }
@@ -222,6 +239,13 @@ impl Profile {
             return Err(invalid(
                 "[tls] is set but security_protocol is not ssl or sasl_ssl",
             ));
+        }
+        if let Some(sr) = &self.schema_registry {
+            if sr.username.is_some() != sr.password_env.is_some() {
+                return Err(invalid(
+                    "schema_registry needs both username and password_env, or neither",
+                ));
+            }
         }
         Ok(())
     }
@@ -267,6 +291,21 @@ impl Profile {
         Ok(props)
     }
 
+    /// The Schema Registry settings with the password read from the environment.
+    pub fn resolved_schema_registry(&self) -> Result<Option<ResolvedSchemaRegistry>, ConfigError> {
+        let Some(sr) = &self.schema_registry else {
+            return Ok(None);
+        };
+        let basic_auth = match (&sr.username, &sr.password_env) {
+            (Some(user), Some(var)) => Some((user.clone(), self.env_secret(var)?)),
+            _ => None,
+        };
+        Ok(Some(ResolvedSchemaRegistry {
+            url: sr.url.trim_end_matches('/').to_owned(),
+            basic_auth,
+        }))
+    }
+
     fn env_secret(&self, var: &str) -> Result<String, ConfigError> {
         std::env::var(var).map_err(|_| ConfigError::MissingPasswordEnv {
             profile: self.name.clone(),
@@ -293,6 +332,7 @@ prod = true
 sasl = { mechanism = "SCRAM-SHA-512", username = "svc", password_env = "KAFFY_TEST_STAGING_PW" }
 tls = { ca_location = "/tmp/ca.pem" }
 librdkafka = { "socket.timeout.ms" = "5000" }
+schema_registry = { url = "https://sr:8081/", username = "key", password_env = "KAFFY_TEST_SR_PW" }
 "#;
 
     fn get<'a>(props: &'a [(String, String)], key: &str) -> Option<&'a str> {
@@ -338,6 +378,14 @@ librdkafka = { "socket.timeout.ms" = "5000" }
         assert_eq!(get(&props, "sasl.password"), Some("s3cret"));
         assert_eq!(get(&props, "ssl.ca.location"), Some("/tmp/ca.pem"));
         assert_eq!(get(&props, "socket.timeout.ms"), Some("5000"));
+
+        unsafe { std::env::set_var("KAFFY_TEST_SR_PW", "sr-secret") };
+        let sr = staging.resolved_schema_registry().unwrap().unwrap();
+        assert_eq!(sr.url, "https://sr:8081");
+        assert_eq!(
+            sr.basic_auth,
+            Some(("key".to_owned(), "sr-secret".to_owned()))
+        );
     }
 
     #[test]

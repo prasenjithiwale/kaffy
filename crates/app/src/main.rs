@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use crossterm::event::{Event as TermEvent, EventStream, KeyEventKind};
 use futures::StreamExt;
-use kaffy_config::{Config, Profile};
+use kaffy_config::{Config, Profile, SchemaRegistry};
 use kaffy_kafka::{Command, Worker};
 use kaffy_ui::{Action, AppState, Effect};
 use ratatui::DefaultTerminal;
@@ -31,8 +31,12 @@ struct Args {
     #[arg(long, short, conflicts_with = "profile")]
     bootstrap: Option<String>,
 
+    /// Schema Registry URL for decoding Avro; overrides the profile's
+    #[arg(long, value_name = "URL")]
+    schema_registry: Option<String>,
+
     /// Run against a built-in fake cluster; no broker needed
-    #[arg(long, conflicts_with_all = ["profile", "bootstrap"])]
+    #[arg(long, conflicts_with_all = ["profile", "bootstrap", "schema_registry"])]
     demo: bool,
 }
 
@@ -65,6 +69,18 @@ async fn main() -> Result<()> {
 }
 
 fn resolve_profile(args: &Args) -> Result<Profile> {
+    let mut profile = load_profile(args)?;
+    if let Some(url) = &args.schema_registry {
+        profile.schema_registry = Some(SchemaRegistry {
+            url: url.clone(),
+            username: None,
+            password_env: None,
+        });
+    }
+    Ok(profile)
+}
+
+fn load_profile(args: &Args) -> Result<Profile> {
     if let Some(bootstrap) = &args.bootstrap {
         return Ok(Profile::adhoc(bootstrap));
     }

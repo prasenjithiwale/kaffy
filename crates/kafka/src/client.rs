@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use kaffy_config::Profile;
+use kaffy_schema::Registry;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer, StreamConsumer};
 use rdkafka::error::{KafkaError, KafkaResult};
@@ -29,10 +30,16 @@ pub fn spawn(profile: &Profile) -> Result<Worker, Error> {
         base.set(key, value);
     }
     let metadata: Arc<BaseConsumer> = Arc::new(viewer_config(&base).create()?);
+    let registry = match profile.resolved_schema_registry()? {
+        Some(sr) => Some(Arc::new(
+            Registry::new(&sr.url, sr.basic_auth).map_err(Error::SchemaRegistry)?,
+        )),
+        None => None,
+    };
 
     let (command_tx, command_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::channel(EVENT_BUFFER);
-    tokio::spawn(run(base, metadata, command_rx, event_tx));
+    tokio::spawn(run(base, metadata, registry, command_rx, event_tx));
     Ok(Worker {
         commands: command_tx,
         events: event_rx,
@@ -59,6 +66,7 @@ struct Tail {
 async fn run(
     base: ClientConfig,
     metadata: Arc<BaseConsumer>,
+    registry: Option<Arc<Registry>>,
     mut commands: mpsc::UnboundedReceiver<Command>,
     events: mpsc::Sender<Event>,
 ) {
@@ -90,6 +98,7 @@ async fn run(
                 let (control, control_rx) = mpsc::unbounded_channel();
                 let task = tokio::spawn(run_tail(
                     viewer_config(&base),
+                    registry.clone(),
                     session,
                     topic,
                     start,
@@ -137,13 +146,14 @@ fn fetch_topics(consumer: &BaseConsumer) -> KafkaResult<(usize, Vec<TopicInfo>)>
 
 async fn run_tail(
     config: ClientConfig,
+    registry: Option<Arc<Registry>>,
     session: u64,
     topic: String,
     start: StartAt,
     control: mpsc::UnboundedReceiver<Command>,
     events: mpsc::Sender<Event>,
 ) {
-    if let Err(e) = tail(config, session, &topic, start, control, &events).await {
+    if let Err(e) = tail(config, registry, session, &topic, start, control, &events).await {
         let _ = events
             .send(Event::Error(format!("tail {topic}: {e}")))
             .await;
@@ -152,6 +162,7 @@ async fn run_tail(
 
 async fn tail(
     config: ClientConfig,
+    registry: Option<Arc<Registry>>,
     session: u64,
     topic: &str,
     start: StartAt,
@@ -182,7 +193,16 @@ async fn tail(
         tokio::select! {
             message = stream.next() => match message {
                 Some(Ok(message)) => {
-                    let event = Event::Record { session, record: to_record(&message) };
+                    let mut record = to_record(&message);
+                    drop(message);
+                    if let Some(registry) = &registry {
+                        record.key_decoded = decode(registry, record.key.as_deref()).await;
+                        record.value_decoded = decode(registry, record.value.as_deref()).await;
+                    }
+                    let event = Event::Record {
+                        session,
+                        record: Box::new(record),
+                    };
                     if events.send(event).await.is_err() {
                         return Ok(());
                     }
@@ -244,6 +264,10 @@ fn assign(consumer: &StreamConsumer, topic: &str, start: StartAt) -> KafkaResult
     Ok(topic_md.partitions().len())
 }
 
+async fn decode(registry: &Registry, bytes: Option<&[u8]>) -> Option<kaffy_schema::Decoded> {
+    registry.decode(bytes?).await
+}
+
 fn to_record(message: &BorrowedMessage<'_>) -> Record {
     Record {
         topic: message.topic().to_owned(),
@@ -264,5 +288,7 @@ fn to_record(message: &BorrowedMessage<'_>) -> Record {
                     .collect()
             })
             .unwrap_or_default(),
+        key_decoded: None,
+        value_decoded: None,
     }
 }
