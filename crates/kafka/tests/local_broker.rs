@@ -788,19 +788,28 @@ async fn topic_create_config_truncate_delete() {
 async fn describes_cluster_health() {
     let topic = TestTopic::create().await;
     let mut worker = kaffy_kafka::spawn(&Profile::adhoc(bootstrap())).unwrap();
-    worker.commands.send(Command::DescribeCluster).unwrap();
-    let cluster = expect(&mut worker, |event| match event {
-        Event::Cluster(cluster) => Some(cluster),
-        _ => None,
-    })
-    .await;
+    // A new topic can take a moment to reach every broker's metadata.
+    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    let cluster = loop {
+        worker.commands.send(Command::DescribeCluster).unwrap();
+        let cluster = expect(&mut worker, |event| match event {
+            Event::Cluster(cluster) => Some(cluster),
+            _ => None,
+        })
+        .await;
+        if cluster.topics.iter().any(|t| t.name == topic.name)
+            || tokio::time::Instant::now() > deadline
+        {
+            break cluster;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
     assert!(cluster.cluster_id.is_some(), "KRaft clusters have an id");
     let controller = cluster.controller.expect("controller id");
     assert!(!cluster.brokers.is_empty());
     let health = cluster.broker_health();
     assert!(health.iter().all(|b| b.address.is_some()), "{health:?}");
     let ids: Vec<i32> = cluster.brokers.iter().map(|b| b.id).collect();
-    println!("controller {controller}, brokers {ids:?}");
     assert!(
         ids.contains(&controller),
         "controller {controller}, brokers {ids:?}"
