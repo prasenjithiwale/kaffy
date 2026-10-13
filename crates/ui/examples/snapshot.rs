@@ -98,6 +98,42 @@ async fn main() {
     settle(&mut worker, &mut state, 300).await;
     screens.push(("reset", draw(&mut state)));
 
+    // Schema Registry: open the sensor-readings subject and diff v1 against v2.
+    act(
+        &mut worker,
+        &mut state,
+        &[Action::DialogCancel, Action::ShowSchemas],
+    )
+    .await;
+    settle(&mut worker, &mut state, 300).await;
+    screens.push(("schemas", draw(&mut state)));
+
+    act(&mut worker, &mut state, &[Action::Open]).await;
+    settle(&mut worker, &mut state, 300).await;
+    act(
+        &mut worker,
+        &mut state,
+        &[Action::ToggleDiff, Action::PageDown],
+    )
+    .await;
+    settle(&mut worker, &mut state, 300).await;
+    screens.push(("schema-diff", draw(&mut state)));
+
+    // Topic config: orders overrides retention.ms.
+    act(
+        &mut worker,
+        &mut state,
+        &[
+            Action::ShowTopics,
+            Action::Top,
+            Action::Down,
+            Action::ShowConfig,
+        ],
+    )
+    .await;
+    settle(&mut worker, &mut state, 300).await;
+    screens.push(("config", draw(&mut state)));
+
     for (name, html) in screens {
         println!("<pre class=\"tui\" data-screen=\"{name}\">{html}</pre>");
     }
@@ -113,18 +149,26 @@ fn send(worker: &Worker, command: Command) {
 /// Applies actions, forwarding any Kafka commands they produce.
 async fn act(worker: &mut Worker, state: &mut AppState, actions: &[Action]) {
     for action in actions {
-        if let Some(Effect::Kafka(command)) = state.update(action.clone()) {
-            send(worker, command);
-        }
+        forward(worker, state.update(action.clone()));
     }
     settle(worker, state, 50).await;
 }
 
-/// Feeds demo events into the state for `ms` milliseconds.
+/// Feeds demo events into the state for `ms` milliseconds, forwarding follow-up commands.
 async fn settle(worker: &mut Worker, state: &mut AppState, ms: u64) {
     let deadline = tokio::time::Instant::now() + Duration::from_millis(ms);
     while let Ok(Some(event)) = tokio::time::timeout_at(deadline, worker.events.recv()).await {
-        state.on_event(event);
+        forward(worker, state.on_event(event));
+    }
+}
+
+fn forward(worker: &Worker, effect: Option<Effect>) {
+    match effect {
+        Some(Effect::Kafka(command)) => send(worker, command),
+        Some(Effect::Many(effects)) => effects
+            .into_iter()
+            .for_each(|effect| forward(worker, Some(effect))),
+        _ => {}
     }
 }
 
