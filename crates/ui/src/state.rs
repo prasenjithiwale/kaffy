@@ -1018,10 +1018,11 @@ impl AppState {
                 return Some(self.open_subject(subject));
             }
             Action::NewSubject => {
-                if self.check_writable("registering schemas") {
-                    self.wizard = Some(Wizard::NewSubject);
-                    return self.update(Action::BeginInput(InputKind::SubjectName));
+                if !self.check_writable("registering schemas") {
+                    return None;
                 }
+                self.wizard = Some(Wizard::NewSubject);
+                return self.update(Action::BeginInput(InputKind::SubjectName));
             }
             _ => {}
         }
@@ -1616,30 +1617,33 @@ impl AppState {
                 return Some(self.start_tail(topic, DEFAULT_START));
             }
             Action::CreateTopic => {
-                if self.check_writable("creating topics") {
-                    self.wizard = Some(Wizard::CreateTopic {
-                        name: None,
-                        partitions: None,
-                    });
-                    return self.update(Action::BeginInput(InputKind::NewTopicName));
+                if !self.check_writable("creating topics") {
+                    return None;
                 }
+                self.wizard = Some(Wizard::CreateTopic {
+                    name: None,
+                    partitions: None,
+                });
+                return self.update(Action::BeginInput(InputKind::NewTopicName));
             }
             Action::DeleteTopic => {
                 let topic = self.visible_topics().get(selected).map(|t| (*t).clone())?;
-                if self.check_writable("deleting topics") {
-                    self.dialog = Some(Dialog::DeleteTopic {
-                        confirm: Confirm::typed(&topic.name),
-                        partitions: topic.partitions.len(),
-                        topic: topic.name,
-                    });
+                if !self.check_writable("deleting topics") {
+                    return None;
                 }
+                self.dialog = Some(Dialog::DeleteTopic {
+                    confirm: Confirm::typed(&topic.name),
+                    partitions: topic.partitions.len(),
+                    topic: topic.name,
+                });
             }
             Action::Truncate => {
                 let topic = self.visible_topics().get(selected)?.name.clone();
-                if self.check_writable("deleting records") {
-                    self.wizard = Some(Wizard::Truncate { topic });
-                    return self.update(Action::BeginInput(InputKind::TruncateBefore));
+                if !self.check_writable("deleting records") {
+                    return None;
                 }
+                self.wizard = Some(Wizard::Truncate { topic });
+                return self.update(Action::BeginInput(InputKind::TruncateBefore));
             }
             Action::ShowConfig => {
                 let topic = self.visible_topics().get(selected)?.name.clone();
