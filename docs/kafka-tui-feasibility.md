@@ -1,5 +1,7 @@
 # Kafka Event Viewer TUI (Rust): Feasibility & Scope
 
+> **Status (2026-10-13):** Phases 1–3 are built; v0.2.0 is released and v0.3.0 is next. See [STATUS.md](STATUS.md) for the current state and the release runbook.
+
 ## 1. Verdict
 
 It is feasible to build this in Rust. The libraries for the terminal UI, the Kafka client and Schema Registry access are all mature enough.
