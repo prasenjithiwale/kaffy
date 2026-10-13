@@ -8,7 +8,8 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use kaffy_kafka::{
-    Command, Event, Operation, Record, RecordFilter, ReplayEnd, ResetTarget, StartAt, TopicInfo,
+    Command, ConfigEntry, ConfigSource, Event, NewTopic, Operation, ProduceRequest, Record,
+    RecordFilter, ReplayEnd, ResetTarget, StartAt, TopicInfo,
 };
 use kaffy_schema::Rendered;
 use ratatui::widgets::TableState;
@@ -34,6 +35,7 @@ pub enum Screen {
     Detail,
     Groups,
     GroupDetail,
+    TopicConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +48,11 @@ pub enum InputKind {
     ReplayTarget,
     ReplayStart,
     ReplayEnd,
+    NewTopicName,
+    NewTopicPartitions,
+    NewTopicReplication,
+    TruncateBefore,
+    ConfigValue,
 }
 
 impl InputKind {
@@ -61,6 +68,13 @@ impl InputKind {
             Self::ReplayTarget => "replay into topic: ",
             Self::ReplayStart => "replay from (beginning, an offset, or a time like -1h): ",
             Self::ReplayEnd => "replay until (now, an offset, or a time): ",
+            Self::NewTopicName => "new topic name: ",
+            Self::NewTopicPartitions => "partitions: ",
+            Self::NewTopicReplication => "replication factor: ",
+            Self::TruncateBefore => {
+                "delete records before (an offset, a time like -7d, or end for all): "
+            }
+            Self::ConfigValue => "new value: ",
         }
     }
 }
@@ -77,6 +91,26 @@ enum Wizard {
         target: Option<String>,
         start: Option<StartAt>,
     },
+    CreateTopic {
+        name: Option<String>,
+        partitions: Option<i32>,
+    },
+    Truncate {
+        topic: String,
+    },
+    ConfigEdit {
+        topic: String,
+        name: String,
+        old: Option<String>,
+    },
+}
+
+/// The config screen of one topic.
+#[derive(Debug, Clone)]
+pub struct TopicConfigView {
+    pub topic: String,
+    pub entries: Option<Vec<ConfigEntry>>,
+    pub table: TableState,
 }
 
 /// The template handed to `$EDITOR`, to tell an untouched new message from an edit.
@@ -133,6 +167,15 @@ pub enum Action {
     /// The text saved in `$EDITOR`.
     Edited(String),
     ToggleHelp,
+    CreateTopic,
+    DeleteTopic,
+    /// Delete records before a position.
+    Truncate,
+    ShowConfig,
+    /// Reset the selected config to its inherited value.
+    ResetConfig,
+    /// Produce a tombstone for the selected message's key.
+    Tombstone,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -392,6 +435,7 @@ pub struct AppState {
     pub should_quit: bool,
     pub groups: GroupsView,
     pub group_detail: Option<GroupDetailView>,
+    pub topic_config: Option<TopicConfigView>,
     pub dialog: Option<Dialog>,
     pub show_help: bool,
     wizard: Option<Wizard>,
@@ -418,6 +462,7 @@ impl AppState {
             should_quit: false,
             groups: GroupsView::default(),
             group_detail: None,
+            topic_config: None,
             dialog: None,
             show_help: false,
             wizard: None,
@@ -452,7 +497,8 @@ impl AppState {
         });
     }
 
-    pub fn on_event(&mut self, event: Event) {
+    /// Applies a worker event; some ask for a follow-up request.
+    pub fn on_event(&mut self, event: Event) -> Option<Effect> {
         match event {
             Event::Metadata { brokers, topics } => {
                 self.connection = Connection::Connected { brokers };
@@ -546,7 +592,7 @@ impl AppState {
                 if let Some(Dialog::ReplayProgress { progress, .. }) = self.dialog.as_mut() {
                     if progress.id == update.id {
                         *progress = update;
-                        return;
+                        return None;
                     }
                 }
                 if update.done {
@@ -572,6 +618,46 @@ impl AppState {
                 self.flash_error(message);
             }
             Event::Error(message) => self.flash_error(message),
+            Event::TopicCreated { name } => {
+                self.close_pending(Operation::CreateTopic);
+                self.flash_info(format!("created topic {name}"));
+                return Some(Effect::Kafka(Command::ListTopics));
+            }
+            Event::TopicDeleted { name } => {
+                self.close_pending(Operation::DeleteTopic);
+                self.flash_info(format!("deleted topic {name}"));
+                return Some(Effect::Kafka(Command::ListTopics));
+            }
+            Event::TopicConfig { topic, entries } => {
+                if let Some(view) = self.topic_config.as_mut().filter(|v| v.topic == topic) {
+                    view.entries = Some(entries);
+                    let len = view.entries.as_ref().map_or(0, Vec::len);
+                    let selected = view.table.selected().unwrap_or(0);
+                    view.table.select(Some(selected.min(len.saturating_sub(1))));
+                }
+            }
+            Event::TopicConfigAltered { topic, changed } => {
+                self.close_pending(Operation::AlterTopicConfig);
+                self.flash_info(format!("changed {changed} setting(s) of {topic}"));
+                return Some(Effect::Kafka(Command::DescribeTopicConfig(topic)));
+            }
+            Event::DeleteRecordsPlan(plan) => {
+                if self.pending(Operation::PlanDeleteRecords) {
+                    let confirm = Confirm::typed(&plan.topic);
+                    self.dialog = Some(Dialog::DeleteRecords { plan, confirm });
+                }
+            }
+            Event::RecordsDeleted { topic, records } => {
+                self.close_pending(Operation::DeleteRecords);
+                self.flash_info(format!("deleted {records} record(s) from {topic}"));
+            }
+        }
+        None
+    }
+
+    fn close_pending(&mut self, operation: Operation) {
+        if self.pending(operation) {
+            self.dialog = None;
         }
     }
 
@@ -616,6 +702,11 @@ impl AppState {
                     },
                     InputKind::ReplayStart => "beginning".to_owned(),
                     InputKind::ReplayEnd => "now".to_owned(),
+                    InputKind::NewTopicPartitions => "3".to_owned(),
+                    InputKind::NewTopicReplication => match self.connection {
+                        Connection::Connected { brokers } => brokers.clamp(1, 3).to_string(),
+                        Connection::Connecting => "1".to_owned(),
+                    },
                     _ => String::new(),
                 };
                 self.input = Some(Input {
@@ -652,16 +743,87 @@ impl AppState {
                 Screen::Detail => self.update_detail(action),
                 Screen::Groups => self.update_groups(action),
                 Screen::GroupDetail => self.update_group_detail(action),
+                Screen::TopicConfig => self.update_topic_config(action),
             },
         }
+    }
+
+    fn update_topic_config(&mut self, action: Action) -> Option<Effect> {
+        let view = self.topic_config.as_mut()?;
+        let len = view.entries.as_ref().map_or(0, Vec::len);
+        let selected = view.table.selected().unwrap_or(0);
+        let mut select = |i: usize| view.table.select(Some(i.min(len.saturating_sub(1))));
+        match action {
+            Action::Up => select(selected.saturating_sub(1)),
+            Action::Down => select(selected + 1),
+            Action::PageUp => select(selected.saturating_sub(10)),
+            Action::PageDown => select(selected + 10),
+            Action::Top => select(0),
+            Action::Bottom => select(len),
+            Action::Refresh => {
+                return Some(Effect::Kafka(Command::DescribeTopicConfig(
+                    view.topic.clone(),
+                )));
+            }
+            Action::Back => {
+                self.topic_config = None;
+                self.screen = Screen::Topics;
+            }
+            Action::Open => {
+                let entry = view.entries.as_ref()?.get(selected)?.clone();
+                let topic = view.topic.clone();
+                if entry.read_only {
+                    self.flash_error(format!("{} is read-only", entry.name));
+                    return None;
+                }
+                if !self.check_writable("changing configs") {
+                    return None;
+                }
+                self.wizard = Some(Wizard::ConfigEdit {
+                    topic,
+                    name: entry.name.clone(),
+                    old: entry.value.clone(),
+                });
+                self.input = Some(Input {
+                    kind: InputKind::ConfigValue,
+                    buffer: entry.value.clone().unwrap_or_default(),
+                    previous: String::new(),
+                });
+            }
+            Action::ResetConfig => {
+                let entry = view.entries.as_ref()?.get(selected)?.clone();
+                let topic = view.topic.clone();
+                if entry.source != ConfigSource::Topic {
+                    self.flash_info(format!(
+                        "{} is not set on this topic; it already uses the inherited value",
+                        entry.name
+                    ));
+                    return None;
+                }
+                if !self.check_writable("changing configs") {
+                    return None;
+                }
+                let confirm = Confirm::new(self.prod, &topic);
+                self.dialog = Some(Dialog::ConfigChange {
+                    topic,
+                    name: entry.name,
+                    old: entry.value,
+                    new: None,
+                    confirm,
+                });
+            }
+            _ => {}
+        }
+        None
     }
 
     fn show_topics(&mut self) -> Option<Effect> {
         match self.screen {
             Screen::Topics => None,
             Screen::Messages | Screen::Detail => self.leave_tail(Screen::Topics),
-            Screen::Groups | Screen::GroupDetail => {
+            Screen::Groups | Screen::GroupDetail | Screen::TopicConfig => {
                 self.group_detail = None;
+                self.topic_config = None;
                 self.screen = Screen::Topics;
                 Some(Effect::Kafka(Command::ListTopics))
             }
@@ -672,8 +834,9 @@ impl AppState {
         let leave = match self.screen {
             Screen::Groups => return None,
             Screen::Messages | Screen::Detail => self.leave_tail(Screen::Groups),
-            Screen::Topics | Screen::GroupDetail => None,
+            Screen::Topics | Screen::GroupDetail | Screen::TopicConfig => None,
         };
+        self.topic_config = None;
         self.screen = Screen::Groups;
         self.group_detail = None;
         self.groups.requested = Some(Instant::now());
@@ -902,7 +1065,11 @@ impl AppState {
             (
                 Dialog::ResetPlan { confirm, .. }
                 | Dialog::ReplayPlan { confirm, .. }
-                | Dialog::ProduceReview { confirm, .. },
+                | Dialog::ProduceReview { confirm, .. }
+                | Dialog::CreateTopic { confirm, .. }
+                | Dialog::DeleteTopic { confirm, .. }
+                | Dialog::DeleteRecords { confirm, .. }
+                | Dialog::ConfigChange { confirm, .. },
                 action,
             ) => {
                 let confirmed = match action {
@@ -1003,6 +1170,42 @@ impl AppState {
                     operation: Operation::Produce,
                 });
                 Some(Effect::Kafka(Command::Produce(request)))
+            }
+            Dialog::CreateTopic { spec, .. } => {
+                self.dialog = Some(Dialog::Pending {
+                    title: format!("Creating {}…", spec.name),
+                    operation: Operation::CreateTopic,
+                });
+                Some(Effect::Kafka(Command::CreateTopic(spec)))
+            }
+            Dialog::DeleteTopic { topic, .. } => {
+                self.dialog = Some(Dialog::Pending {
+                    title: format!("Deleting {topic}…"),
+                    operation: Operation::DeleteTopic,
+                });
+                Some(Effect::Kafka(Command::DeleteTopic(topic)))
+            }
+            Dialog::DeleteRecords { plan, .. } => {
+                self.dialog = Some(Dialog::Pending {
+                    title: format!("Deleting records from {}…", plan.topic),
+                    operation: Operation::DeleteRecords,
+                });
+                Some(Effect::Kafka(Command::DeleteRecords {
+                    offsets: plan.offsets(),
+                    topic: plan.topic,
+                }))
+            }
+            Dialog::ConfigChange {
+                topic, name, new, ..
+            } => {
+                self.dialog = Some(Dialog::Pending {
+                    title: format!("Changing {name} of {topic}…"),
+                    operation: Operation::AlterTopicConfig,
+                });
+                Some(Effect::Kafka(Command::AlterTopicConfig {
+                    topic,
+                    changes: vec![(name, new)],
+                }))
             }
             other => {
                 self.dialog = Some(other);
@@ -1112,6 +1315,42 @@ impl AppState {
                 self.tail = None;
                 return Some(self.start_tail(topic, DEFAULT_START));
             }
+            Action::CreateTopic => {
+                if self.check_writable("creating topics") {
+                    self.wizard = Some(Wizard::CreateTopic {
+                        name: None,
+                        partitions: None,
+                    });
+                    return self.update(Action::BeginInput(InputKind::NewTopicName));
+                }
+            }
+            Action::DeleteTopic => {
+                let topic = self.visible_topics().get(selected).map(|t| (*t).clone())?;
+                if self.check_writable("deleting topics") {
+                    self.dialog = Some(Dialog::DeleteTopic {
+                        confirm: Confirm::typed(&topic.name),
+                        partitions: topic.partitions.len(),
+                        topic: topic.name,
+                    });
+                }
+            }
+            Action::Truncate => {
+                let topic = self.visible_topics().get(selected)?.name.clone();
+                if self.check_writable("deleting records") {
+                    self.wizard = Some(Wizard::Truncate { topic });
+                    return self.update(Action::BeginInput(InputKind::TruncateBefore));
+                }
+            }
+            Action::ShowConfig => {
+                let topic = self.visible_topics().get(selected)?.name.clone();
+                self.topic_config = Some(TopicConfigView {
+                    topic: topic.clone(),
+                    entries: None,
+                    table: TableState::default().with_selected(0),
+                });
+                self.screen = Screen::TopicConfig;
+                return Some(Effect::Kafka(Command::DescribeTopicConfig(topic)));
+            }
             _ => {}
         }
         None
@@ -1166,6 +1405,10 @@ impl AppState {
                 let record = tail.selected_row()?.record.clone();
                 return self.begin_produce(Some(record));
             }
+            Action::Tombstone => {
+                let record = tail.selected_row()?.record.clone();
+                return self.begin_tombstone(&record);
+            }
             Action::Replay => return self.begin_replay(),
             Action::Export => {
                 self.dialog = Some(Dialog::Choice {
@@ -1203,8 +1446,35 @@ impl AppState {
                 return self.begin_produce(Some(record));
             }
             Action::Produce => return self.begin_produce(None),
+            Action::Tombstone => {
+                let record = detail.record.clone();
+                return self.begin_tombstone(&record);
+            }
             _ => {}
         }
+        None
+    }
+
+    /// A null value for the record's key, which compaction treats as a delete.
+    fn begin_tombstone(&mut self, record: &Record) -> Option<Effect> {
+        if !self.check_writable("producing tombstones") {
+            return None;
+        }
+        let Some(key) = record.key.clone() else {
+            self.flash_error("this message has no key; a tombstone needs one");
+            return None;
+        };
+        self.next_request += 1;
+        let request = ProduceRequest {
+            id: self.next_request,
+            topic: record.topic.clone(),
+            partition: Some(record.partition),
+            key: Some(key),
+            value: None,
+            headers: Vec::new(),
+        };
+        let confirm = Confirm::new(self.prod, &request.topic);
+        self.dialog = Some(Dialog::ProduceReview { request, confirm });
         None
     }
 
@@ -1294,6 +1564,88 @@ impl AppState {
                     start,
                     end,
                 }));
+            }
+            (InputKind::NewTopicName, Some(Wizard::CreateTopic { .. })) => {
+                if text.is_empty() || text.contains(char::is_whitespace) {
+                    self.flash_error("a topic name can't be empty or contain spaces");
+                    return None;
+                }
+                if self.topics.iter().flatten().any(|t| t.name == text) {
+                    self.flash_error(format!("topic {text} already exists"));
+                    return None;
+                }
+                self.wizard = Some(Wizard::CreateTopic {
+                    name: Some(text.to_owned()),
+                    partitions: None,
+                });
+                return self.update(Action::BeginInput(InputKind::NewTopicPartitions));
+            }
+            (InputKind::NewTopicPartitions, Some(Wizard::CreateTopic { name, .. })) => {
+                let Some(partitions) = text.parse::<i32>().ok().filter(|p| *p >= 1) else {
+                    self.flash_error(format!("not a partition count: {text:?}"));
+                    return None;
+                };
+                self.wizard = Some(Wizard::CreateTopic {
+                    name,
+                    partitions: Some(partitions),
+                });
+                return self.update(Action::BeginInput(InputKind::NewTopicReplication));
+            }
+            (
+                InputKind::NewTopicReplication,
+                Some(Wizard::CreateTopic {
+                    name: Some(name),
+                    partitions: Some(partitions),
+                }),
+            ) => {
+                let Some(replication) = text.parse::<i32>().ok().filter(|r| *r >= 1) else {
+                    self.flash_error(format!("not a replication factor: {text:?}"));
+                    return None;
+                };
+                let confirm = Confirm::new(self.prod, &name);
+                self.dialog = Some(Dialog::CreateTopic {
+                    spec: NewTopic {
+                        name,
+                        partitions,
+                        replication,
+                        configs: Vec::new(),
+                    },
+                    confirm,
+                });
+                return None;
+            }
+            (InputKind::TruncateBefore, Some(Wizard::Truncate { topic })) => {
+                let before = match text {
+                    "end" | "all" | "now" => Some(StartAt::End),
+                    _ => match text.parse::<i64>() {
+                        Ok(n) if n >= 0 => Some(StartAt::Offset(n)),
+                        _ => fmt::parse_timestamp(text, now).map(StartAt::Timestamp),
+                    },
+                };
+                let Some(before) = before else {
+                    self.flash_error(format!("not an offset or time: {text:?}"));
+                    return None;
+                };
+                self.dialog = Some(Dialog::Pending {
+                    title: format!("Counting records to delete from {topic}…"),
+                    operation: Operation::PlanDeleteRecords,
+                });
+                return Some(Effect::Kafka(Command::PlanDeleteRecords { topic, before }));
+            }
+            (InputKind::ConfigValue, Some(Wizard::ConfigEdit { topic, name, old })) => {
+                if old.as_deref() == Some(text) {
+                    self.flash_info(format!("{name} is already {text}"));
+                    return None;
+                }
+                let confirm = Confirm::new(self.prod, &topic);
+                self.dialog = Some(Dialog::ConfigChange {
+                    topic,
+                    name,
+                    old,
+                    new: Some(text.to_owned()),
+                    confirm,
+                });
+                return None;
             }
             (_, wizard) => self.wizard = wizard,
         }
@@ -1970,6 +2322,197 @@ mod tests {
             Some(Effect::Kafka(Command::ListGroups))
         ));
         assert_eq!(state.screen, Screen::Groups);
+    }
+
+    fn type_and_enter(state: &mut AppState, text: &str) -> Option<Effect> {
+        for c in text.chars() {
+            state.update(Action::DialogKey(c));
+        }
+        state.update(Action::DialogEnter)
+    }
+
+    #[test]
+    fn create_topic_wizard() {
+        let mut state = writable(false);
+        state.update(Action::CreateTopic);
+        assert_eq!(state.input.as_ref().unwrap().kind, InputKind::NewTopicName);
+        for c in "orders".chars() {
+            state.update(Action::InputChar(c));
+        }
+        state.update(Action::InputSubmit);
+        assert!(
+            state
+                .flash
+                .as_ref()
+                .unwrap()
+                .text
+                .contains("already exists"),
+            "existing names are caught early"
+        );
+        state.update(Action::CreateTopic);
+        for c in "audit".chars() {
+            state.update(Action::InputChar(c));
+        }
+        state.update(Action::InputSubmit);
+        assert_eq!(
+            state.input.as_ref().unwrap().buffer,
+            "3",
+            "partitions default"
+        );
+        state.update(Action::InputSubmit);
+        assert_eq!(
+            state.input.as_ref().unwrap().buffer,
+            "1",
+            "replication defaults to the broker count"
+        );
+        state.update(Action::InputSubmit);
+        assert!(matches!(&state.dialog, Some(Dialog::CreateTopic { .. })));
+        let Some(Effect::Kafka(Command::CreateTopic(spec))) = state.update(Action::DialogKey('y'))
+        else {
+            panic!("y creates it");
+        };
+        assert_eq!(
+            (spec.name.as_str(), spec.partitions, spec.replication),
+            ("audit", 3, 1)
+        );
+        assert_eq!(
+            state.on_event(Event::TopicCreated {
+                name: "audit".into()
+            }),
+            Some(Effect::Kafka(Command::ListTopics)),
+            "the list refreshes"
+        );
+        assert!(state.dialog.is_none());
+    }
+
+    #[test]
+    fn permanent_changes_always_need_the_name_typed() {
+        let mut state = writable(false);
+        state.update(Action::DeleteTopic);
+        assert_eq!(
+            state.update(Action::DialogKey('y')),
+            None,
+            "y is not enough, even off prod"
+        );
+        state.update(Action::DialogBackspace);
+        assert_eq!(
+            type_and_enter(&mut state, "orders"),
+            Some(Effect::Kafka(Command::DeleteTopic("orders".into())))
+        );
+
+        state.dialog = None;
+        state.update(Action::Truncate);
+        for c in "-7d".chars() {
+            state.update(Action::InputChar(c));
+        }
+        let Some(Effect::Kafka(Command::PlanDeleteRecords {
+            topic,
+            before: StartAt::Timestamp(_),
+        })) = state.update(Action::InputSubmit)
+        else {
+            panic!("a time plans the delete");
+        };
+        let plan = kaffy_kafka::DeleteRecordsPlan {
+            topic,
+            rows: vec![kaffy_kafka::TruncateRow {
+                partition: 0,
+                low: 0,
+                high: 10,
+                new_low: 4,
+            }],
+        };
+        state.on_event(Event::DeleteRecordsPlan(plan));
+        assert_eq!(state.update(Action::DialogKey('y')), None);
+        state.update(Action::DialogBackspace);
+        assert_eq!(
+            type_and_enter(&mut state, "orders"),
+            Some(Effect::Kafka(Command::DeleteRecords {
+                topic: "orders".into(),
+                offsets: vec![(0, 4)]
+            }))
+        );
+    }
+
+    #[test]
+    fn config_edit_and_reset() {
+        let mut state = writable(false);
+        assert_eq!(
+            state.update(Action::ShowConfig),
+            Some(Effect::Kafka(Command::DescribeTopicConfig("orders".into())))
+        );
+        let entry = |name: &str, value: &str, source| ConfigEntry {
+            name: name.into(),
+            value: Some(value.into()),
+            source,
+            read_only: false,
+            sensitive: false,
+        };
+        state.on_event(Event::TopicConfig {
+            topic: "orders".into(),
+            entries: vec![
+                entry("cleanup.policy", "delete", ConfigSource::Default),
+                entry("retention.ms", "3600000", ConfigSource::Topic),
+            ],
+        });
+        // Resetting an inherited value has nothing to do.
+        assert_eq!(state.update(Action::ResetConfig), None);
+        assert!(state.dialog.is_none());
+
+        state.update(Action::Open);
+        assert_eq!(
+            state.input.as_ref().unwrap().buffer,
+            "delete",
+            "edit starts from the current value"
+        );
+        state.update(Action::InputBackspace);
+        for c in "compact".chars() {
+            state.update(Action::InputChar(c));
+        }
+        // buffer is now "deletcompact": replace it entirely
+        state.input.as_mut().unwrap().buffer = "compact".into();
+        state.update(Action::InputSubmit);
+        assert_eq!(
+            state.update(Action::DialogKey('y')),
+            Some(Effect::Kafka(Command::AlterTopicConfig {
+                topic: "orders".into(),
+                changes: vec![("cleanup.policy".into(), Some("compact".into()))],
+            }))
+        );
+        assert_eq!(
+            state.on_event(Event::TopicConfigAltered {
+                topic: "orders".into(),
+                changed: 1
+            }),
+            Some(Effect::Kafka(Command::DescribeTopicConfig("orders".into())))
+        );
+
+        state.update(Action::Down);
+        state.update(Action::ResetConfig);
+        assert_eq!(
+            state.update(Action::DialogKey('y')),
+            Some(Effect::Kafka(Command::AlterTopicConfig {
+                topic: "orders".into(),
+                changes: vec![("retention.ms".into(), None)],
+            }))
+        );
+    }
+
+    #[test]
+    fn tombstone_for_the_selected_key() {
+        let mut state = writable(false);
+        let session = open_orders(&mut state);
+        state.on_event(Event::Record {
+            session,
+            record: Box::new(record(3, "x")),
+        });
+        state.update(Action::Tombstone);
+        let Some(Dialog::ProduceReview { request, .. }) = &state.dialog else {
+            panic!("review shown")
+        };
+        assert_eq!(
+            (request.key.as_deref(), &request.value, request.partition),
+            (Some(&b"k"[..]), &None, Some(0))
+        );
     }
 
     #[test]

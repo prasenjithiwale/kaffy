@@ -1,3 +1,4 @@
+mod config;
 mod detail;
 mod dialog;
 mod groups;
@@ -29,6 +30,7 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
         Screen::Detail => detail::render(frame, body, state),
         Screen::Groups => groups::render_list(frame, body, state),
         Screen::GroupDetail => groups::render_detail(frame, body, state),
+        Screen::TopicConfig => config::render(frame, body, state),
     }
     render_footer(frame, footer, state);
     dialog::render(frame, state);
@@ -44,10 +46,22 @@ fn keys(screen: Screen) -> &'static [(&'static str, &'static str)] {
             ("↑↓", "move"),
             ("⏎", "open"),
             ("/", "filter"),
+            ("c", "config"),
+            ("n", "new topic"),
+            ("D", "delete"),
+            ("T", "delete records"),
             ("2", "consumer groups"),
-            ("r", "refresh"),
             ("?", "help"),
             ("q", "quit"),
+            ("r", "refresh"),
+        ],
+        Screen::TopicConfig => &[
+            ("↑↓", "move"),
+            ("⏎", "change value"),
+            ("u", "reset to inherited"),
+            ("r", "refresh"),
+            ("?", "help"),
+            ("esc", "back"),
         ],
         Screen::Messages => &[
             ("↑↓", "move"),
@@ -64,6 +78,7 @@ fn keys(screen: Screen) -> &'static [(&'static str, &'static str)] {
             ("o / t", "jump to an offset / a time"),
             ("y / Y", "copy value / key"),
             ("r", "reload"),
+            ("K", "tombstone for this key"),
             ("g / G", "first message / follow newest"),
         ],
         Screen::Detail => &[
@@ -71,6 +86,7 @@ fn keys(screen: Screen) -> &'static [(&'static str, &'static str)] {
             ("y / Y", "copy value / key"),
             ("E", "edit & produce"),
             ("p", "produce"),
+            ("K", "tombstone for this key"),
             ("?", "help"),
             ("esc", "back"),
         ],
@@ -169,7 +185,7 @@ fn render_header(frame: &mut Frame, area: Rect, state: &AppState) {
             "Topics",
             matches!(
                 state.screen,
-                Screen::Topics | Screen::Messages | Screen::Detail
+                Screen::Topics | Screen::Messages | Screen::Detail | Screen::TopicConfig
             ),
         ),
         Span::raw("  "),

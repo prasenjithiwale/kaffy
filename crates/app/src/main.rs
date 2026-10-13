@@ -180,7 +180,9 @@ impl App {
                 },
                 event = self.worker.events.recv() => match event {
                     Some(event) => {
-                        self.state.on_event(event);
+                        if let Some(effect) = self.state.on_event(event) {
+                            self.apply(effect);
+                        }
                         dirty = true;
                     }
                     None => bail!("the Kafka worker stopped unexpectedly"),

@@ -568,3 +568,209 @@ async fn produce_and_filtered_replay() {
     let metadata = admin.fetch_metadata(None, TIMEOUT).unwrap();
     assert!(metadata.topics().iter().all(|t| t.name() != missing));
 }
+
+// ---- Phase 3: topic administration ----
+
+use kaffy_kafka::{ConfigSource, NewTopic as TopicSpec};
+
+fn config_value(
+    entries: &[kaffy_kafka::ConfigEntry],
+    name: &str,
+) -> (Option<String>, ConfigSource) {
+    let e = entries
+        .iter()
+        .find(|e| e.name == name)
+        .expect("config exists");
+    (e.value.clone(), e.source)
+}
+
+#[tokio::test]
+#[ignore = "needs a Kafka broker"]
+async fn topic_create_config_truncate_delete() {
+    let name = unique("kaffy-test-admin");
+    let mut worker = kaffy_kafka::spawn(&writable()).unwrap();
+
+    worker
+        .commands
+        .send(Command::CreateTopic(TopicSpec {
+            name: name.clone(),
+            partitions: 2,
+            replication: 1,
+            configs: vec![("cleanup.policy".into(), "compact,delete".into())],
+        }))
+        .unwrap();
+    expect(&mut worker, |e| match e {
+        Event::TopicCreated { name: n } if n == name => Some(()),
+        _ => None,
+    })
+    .await;
+
+    // Creating it again reports the broker's reason.
+    worker
+        .commands
+        .send(Command::CreateTopic(TopicSpec {
+            name: name.clone(),
+            partitions: 1,
+            replication: 1,
+            configs: vec![],
+        }))
+        .unwrap();
+    assert!(
+        expect_failure(&mut worker, Operation::CreateTopic)
+            .await
+            .contains("already exists")
+    );
+
+    let describe = async |worker: &mut Worker| {
+        worker
+            .commands
+            .send(Command::DescribeTopicConfig(name.clone()))
+            .unwrap();
+        expect(worker, |e| match e {
+            Event::TopicConfig { entries, .. } => Some(entries),
+            _ => None,
+        })
+        .await
+    };
+    let entries = describe(&mut worker).await;
+    assert_eq!(
+        config_value(&entries, "cleanup.policy"),
+        (Some("compact,delete".into()), ConfigSource::Topic)
+    );
+
+    // Changing one setting keeps the others (AlterConfigs replaces them all).
+    worker
+        .commands
+        .send(Command::AlterTopicConfig {
+            topic: name.clone(),
+            changes: vec![("retention.ms".into(), Some("3600000".into()))],
+        })
+        .unwrap();
+    expect(&mut worker, |e| match e {
+        Event::TopicConfigAltered { changed: 1, .. } => Some(()),
+        _ => None,
+    })
+    .await;
+    let entries = describe(&mut worker).await;
+    assert_eq!(
+        config_value(&entries, "retention.ms"),
+        (Some("3600000".into()), ConfigSource::Topic)
+    );
+    assert_eq!(
+        config_value(&entries, "cleanup.policy").0.as_deref(),
+        Some("compact,delete")
+    );
+
+    // Resetting returns it to the inherited value.
+    worker
+        .commands
+        .send(Command::AlterTopicConfig {
+            topic: name.clone(),
+            changes: vec![("retention.ms".into(), None)],
+        })
+        .unwrap();
+    expect(&mut worker, |e| match e {
+        Event::TopicConfigAltered { .. } => Some(()),
+        _ => None,
+    })
+    .await;
+    assert_ne!(
+        config_value(&describe(&mut worker).await, "retention.ms").1,
+        ConfigSource::Topic
+    );
+
+    worker
+        .commands
+        .send(Command::AlterTopicConfig {
+            topic: name.clone(),
+            changes: vec![("no.such.setting".into(), Some("1".into()))],
+        })
+        .unwrap();
+    assert!(
+        expect_failure(&mut worker, Operation::AlterTopicConfig)
+            .await
+            .contains("not a topic config")
+    );
+
+    // DeleteRecords: drop the first 3 of 5 records in partition 0.
+    for i in 0..5 {
+        produce(&name, 0, &format!("k{i}"), b"v").await;
+    }
+    worker
+        .commands
+        .send(Command::PlanDeleteRecords {
+            topic: name.clone(),
+            before: StartAt::Offset(3),
+        })
+        .unwrap();
+    let plan = expect(&mut worker, |e| match e {
+        Event::DeleteRecordsPlan(p) => Some(p),
+        _ => None,
+    })
+    .await;
+    assert_eq!(
+        plan.total(),
+        3,
+        "partition 1 is empty, so only partition 0 changes"
+    );
+    assert_eq!(plan.offsets(), vec![(0, 3)]);
+
+    let mut read_only = kaffy_kafka::spawn(&Profile::adhoc(bootstrap())).unwrap();
+    read_only
+        .commands
+        .send(Command::DeleteRecords {
+            topic: name.clone(),
+            offsets: plan.offsets(),
+        })
+        .unwrap();
+    assert!(
+        expect_failure(&mut read_only, Operation::DeleteRecords)
+            .await
+            .contains("read-only")
+    );
+
+    worker
+        .commands
+        .send(Command::DeleteRecords {
+            topic: name.clone(),
+            offsets: plan.offsets(),
+        })
+        .unwrap();
+    let deleted = expect(&mut worker, |e| match e {
+        Event::RecordsDeleted { records, .. } => Some(records),
+        _ => None,
+    })
+    .await;
+    assert_eq!(deleted, 3);
+    let remaining = tail(&mut worker, &name, StartAt::Beginning, 2).await;
+    assert_eq!(
+        remaining.iter().map(|r| r.offset).collect::<Vec<_>>(),
+        vec![3, 4]
+    );
+
+    worker
+        .commands
+        .send(Command::DeleteTopic(name.clone()))
+        .unwrap();
+    expect(&mut worker, |e| match e {
+        Event::TopicDeleted { name: n } if n == name => Some(()),
+        _ => None,
+    })
+    .await;
+    let admin: BaseConsumer = ClientConfig::new()
+        .set("bootstrap.servers", bootstrap())
+        .create()
+        .unwrap();
+    let gone = tokio::time::Instant::now() + TIMEOUT;
+    loop {
+        let metadata = admin.fetch_metadata(None, TIMEOUT).unwrap();
+        if metadata.topics().iter().all(|t| t.name() != name) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < gone,
+            "topic still listed after delete"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}

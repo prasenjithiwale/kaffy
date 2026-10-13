@@ -4,6 +4,7 @@
 //! through a [`Worker`]: it sends [`Command`]s and receives [`Event`]s, so the
 //! render loop never blocks on the network.
 
+mod admin;
 mod client;
 mod demo;
 mod groups;
@@ -83,6 +84,89 @@ pub enum Command {
         filter: Option<RecordFilter>,
     },
     CancelReplay,
+    /// Answered with [`Event::TopicCreated`].
+    CreateTopic(NewTopic),
+    /// Answered with [`Event::TopicDeleted`]. Permanent.
+    DeleteTopic(String),
+    /// Answered with [`Event::TopicConfig`].
+    DescribeTopicConfig(String),
+    /// Set (`Some`) or reset to the default (`None`) topic configs; answered
+    /// with [`Event::TopicConfigAltered`].
+    AlterTopicConfig {
+        topic: String,
+        changes: Vec<(String, Option<String>)>,
+    },
+    /// Work out what deleting records before a position would remove;
+    /// answered with [`Event::DeleteRecordsPlan`].
+    PlanDeleteRecords {
+        topic: String,
+        before: StartAt,
+    },
+    /// Delete every record before these offsets; answered with
+    /// [`Event::RecordsDeleted`]. Permanent.
+    DeleteRecords {
+        topic: String,
+        offsets: Vec<(i32, i64)>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewTopic {
+    pub name: String,
+    pub partitions: i32,
+    pub replication: i32,
+    pub configs: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigEntry {
+    pub name: String,
+    /// `None` for sensitive values the broker does not reveal.
+    pub value: Option<String>,
+    pub source: ConfigSource,
+    pub read_only: bool,
+    pub sensitive: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigSource {
+    /// Set on this topic.
+    Topic,
+    /// Inherited from the broker configuration.
+    Broker,
+    Default,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteRecordsPlan {
+    pub topic: String,
+    pub rows: Vec<TruncateRow>,
+}
+
+impl DeleteRecordsPlan {
+    /// Records that will be deleted.
+    pub fn total(&self) -> i64 {
+        self.rows.iter().map(|r| (r.new_low - r.low).max(0)).sum()
+    }
+
+    pub fn offsets(&self) -> Vec<(i32, i64)> {
+        self.rows
+            .iter()
+            .filter(|r| r.new_low > r.low)
+            .map(|r| (r.partition, r.new_low))
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TruncateRow {
+    pub partition: i32,
+    /// First offset currently kept.
+    pub low: i64,
+    pub high: i64,
+    /// First offset kept afterwards.
+    pub new_low: i64,
 }
 
 /// The operation an [`Event::Failed`] belongs to.
@@ -95,6 +179,12 @@ pub enum Operation {
     Produce,
     PlanReplay,
     Replay,
+    CreateTopic,
+    DeleteTopic,
+    TopicConfig,
+    AlterTopicConfig,
+    PlanDeleteRecords,
+    DeleteRecords,
 }
 
 /// Where an offset reset moves a group.
@@ -217,6 +307,25 @@ pub enum Event {
     },
     ReplayPlan(ReplayPlan),
     ReplayProgress(ReplayProgress),
+    TopicCreated {
+        name: String,
+    },
+    TopicDeleted {
+        name: String,
+    },
+    TopicConfig {
+        topic: String,
+        entries: Vec<ConfigEntry>,
+    },
+    TopicConfigAltered {
+        topic: String,
+        changed: usize,
+    },
+    DeleteRecordsPlan(DeleteRecordsPlan),
+    RecordsDeleted {
+        topic: String,
+        records: i64,
+    },
     /// A command failed; the UI closes whatever was waiting for it.
     Failed {
         operation: Operation,

@@ -4,7 +4,7 @@
 //! with small, varying lag; one has periodic spikes; one is stopped (Empty) and
 //! falls further behind, so it can be reset.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::f64::consts::TAU;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -13,9 +13,10 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::{HISTORY, HISTORY_STEP_MS, PARTITIONS, TOPICS, mix, now_ms, record, sensor_schema};
 use crate::{
-    Event, GroupDetail, GroupMember, GroupState, GroupSummary, PartitionLag, PartitionOffset,
-    PartitionRange, Payload, ProduceRequest, Record, RecordFilter, ReplayEnd, ReplayPlan,
-    ReplayProgress, ResetPlan, ResetRow, ResetTarget, StartAt,
+    ConfigEntry, ConfigSource, DeleteRecordsPlan, Event, GroupDetail, GroupMember, GroupState,
+    GroupSummary, NewTopic, PartitionInfo, PartitionLag, PartitionOffset, PartitionRange, Payload,
+    ProduceRequest, Record, RecordFilter, ReplayEnd, ReplayPlan, ReplayProgress, ResetPlan,
+    ResetRow, ResetTarget, StartAt, TopicInfo, TruncateRow,
 };
 
 /// Each partition gains a message about every 360 ms (3 partitions at 120 ms).
@@ -48,7 +49,26 @@ pub(super) struct Cluster {
     groups: Vec<Group>,
     /// Records produced or replayed into each partition.
     added: HashMap<(String, i32), i64>,
+    /// Topics created in the demo, with their partition counts. They start empty.
+    created: BTreeMap<String, i32>,
+    deleted: BTreeSet<String>,
+    /// Topic-level config overrides.
+    overrides: HashMap<String, BTreeMap<String, String>>,
+    /// First offset kept per partition, moved by DeleteRecords.
+    lows: HashMap<(String, i32), i64>,
 }
+
+/// Broker defaults shown for every demo topic.
+const DEFAULT_CONFIGS: [(&str, &str); 8] = [
+    ("cleanup.policy", "delete"),
+    ("compression.type", "producer"),
+    ("delete.retention.ms", "86400000"),
+    ("max.message.bytes", "1048588"),
+    ("min.insync.replicas", "1"),
+    ("retention.bytes", "-1"),
+    ("retention.ms", "604800000"),
+    ("segment.bytes", "1073741824"),
+];
 
 pub(super) type Shared = Arc<Mutex<Cluster>>;
 
@@ -113,7 +133,199 @@ impl Cluster {
                 ),
             ],
             added: HashMap::new(),
+            created: BTreeMap::new(),
+            deleted: BTreeSet::new(),
+            // orders keeps 3 days instead of the broker's 7.
+            overrides: HashMap::from([(
+                "orders".to_owned(),
+                BTreeMap::from([("retention.ms".to_owned(), "259200000".to_owned())]),
+            )]),
+            lows: HashMap::new(),
         }))
+    }
+
+    /// Partition count of an existing topic.
+    pub(super) fn partitions_of(&self, topic: &str) -> Option<i32> {
+        if self.deleted.contains(topic) {
+            return None;
+        }
+        if TOPICS.contains(&topic) {
+            return Some(PARTITIONS);
+        }
+        self.created.get(topic).copied()
+    }
+
+    pub(super) fn low(&self, topic: &str, partition: i32) -> i64 {
+        self.lows
+            .get(&(topic.to_owned(), partition))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub(super) fn topic_infos(&self) -> Vec<TopicInfo> {
+        let mut names: Vec<(String, i32)> = TOPICS
+            .iter()
+            .map(|t| (t.to_string(), PARTITIONS))
+            .chain(self.created.iter().map(|(t, p)| (t.clone(), *p)))
+            .filter(|(t, _)| !self.deleted.contains(t))
+            .collect();
+        names.sort();
+        names
+            .into_iter()
+            .map(|(name, partitions)| TopicInfo {
+                // One under-replicated partition, so the column has something to show.
+                partitions: (0..partitions)
+                    .map(|id| PartitionInfo {
+                        id,
+                        leader: id % 3 + 1,
+                        replicas: vec![1, 2, 3],
+                        isr: if name == "sensor-readings" && id == 1 {
+                            vec![1, 3]
+                        } else {
+                            vec![1, 2, 3]
+                        },
+                    })
+                    .collect(),
+                name,
+            })
+            .collect()
+    }
+
+    pub(super) fn create_topic(&mut self, spec: &NewTopic) -> Result<(), String> {
+        if spec.name.trim().is_empty() {
+            return Err("a topic needs a name".to_owned());
+        }
+        if self.partitions_of(&spec.name).is_some() {
+            return Err(format!(
+                "creating {}: Broker: Topic already exists",
+                spec.name
+            ));
+        }
+        if spec.partitions < 1 || spec.replication < 1 {
+            return Err("partitions and replication factor must be at least 1".to_owned());
+        }
+        if spec.replication > 3 {
+            return Err(format!(
+                "creating {}: Broker: Invalid replication factor (the demo cluster has 3 brokers)",
+                spec.name
+            ));
+        }
+        self.deleted.remove(&spec.name);
+        self.created.insert(spec.name.clone(), spec.partitions);
+        self.overrides
+            .insert(spec.name.clone(), spec.configs.iter().cloned().collect());
+        Ok(())
+    }
+
+    pub(super) fn delete_topic(&mut self, name: &str) -> Result<(), String> {
+        if self.partitions_of(name).is_none() {
+            return Err(format!(
+                "deleting {name}: Broker: Unknown topic or partition"
+            ));
+        }
+        self.created.remove(name);
+        self.deleted.insert(name.to_owned());
+        self.overrides.remove(name);
+        Ok(())
+    }
+
+    pub(super) fn describe_config(&self, topic: &str) -> Result<Vec<ConfigEntry>, String> {
+        self.partitions_of(topic).ok_or_else(|| {
+            format!("reading the config of {topic}: Broker: Unknown topic or partition")
+        })?;
+        let overrides = self.overrides.get(topic);
+        Ok(DEFAULT_CONFIGS
+            .iter()
+            .map(|(name, default)| {
+                let (value, source) = match overrides.and_then(|o| o.get(*name)) {
+                    Some(value) => (value.clone(), ConfigSource::Topic),
+                    None => (default.to_string(), ConfigSource::Default),
+                };
+                ConfigEntry {
+                    name: name.to_string(),
+                    value: Some(value),
+                    source,
+                    read_only: false,
+                    sensitive: false,
+                }
+            })
+            .collect())
+    }
+
+    pub(super) fn alter_config(
+        &mut self,
+        topic: &str,
+        changes: &[(String, Option<String>)],
+    ) -> Result<usize, String> {
+        self.describe_config(topic)?;
+        for (name, _) in changes {
+            if !DEFAULT_CONFIGS.iter().any(|(n, _)| n == name) {
+                return Err(format!("{name} is not a topic config"));
+            }
+        }
+        let overrides = self.overrides.entry(topic.to_owned()).or_default();
+        for (name, value) in changes {
+            match value {
+                Some(value) => overrides.insert(name.clone(), value.clone()),
+                None => overrides.remove(name),
+            };
+        }
+        Ok(changes.len())
+    }
+
+    pub(super) fn plan_delete_records(
+        &self,
+        topic: &str,
+        before: StartAt,
+    ) -> Result<DeleteRecordsPlan, String> {
+        let partitions = self
+            .partitions_of(topic)
+            .ok_or_else(|| format!("topic {topic} does not exist"))?;
+        let rows = (0..partitions)
+            .map(|partition| {
+                let low = self.low(topic, partition);
+                let high = self.end(topic, partition).max(low);
+                let new_low = match before {
+                    StartAt::Beginning => low,
+                    StartAt::End => high,
+                    StartAt::LastN(n) => (high - n).max(low),
+                    StartAt::Offset(n) => n.clamp(low, high),
+                    StartAt::Timestamp(ms) => offset_at(self.started_ms, ms).clamp(low, high),
+                };
+                TruncateRow {
+                    partition,
+                    low,
+                    high,
+                    new_low,
+                }
+            })
+            .collect();
+        let plan = DeleteRecordsPlan {
+            topic: topic.to_owned(),
+            rows,
+        };
+        if plan.total() == 0 {
+            return Err("nothing to delete: no partition has records before that point".to_owned());
+        }
+        Ok(plan)
+    }
+
+    pub(super) fn delete_records(
+        &mut self,
+        topic: &str,
+        offsets: &[(i32, i64)],
+    ) -> Result<i64, String> {
+        self.partitions_of(topic)
+            .ok_or_else(|| format!("topic {topic} does not exist"))?;
+        let mut deleted = 0;
+        for &(partition, offset) in offsets {
+            let low = self.low(topic, partition);
+            if offset > low {
+                deleted += offset - low;
+                self.lows.insert((topic.to_owned(), partition), offset);
+            }
+        }
+        Ok(deleted)
     }
 
     fn elapsed_ms(&self) -> i64 {
@@ -121,13 +333,15 @@ impl Cluster {
     }
 
     fn end(&self, topic: &str, partition: i32) -> i64 {
-        HISTORY
-            + self.elapsed_ms() / LIVE_STEP_MS
-            + self
-                .added
-                .get(&(topic.to_owned(), partition))
-                .copied()
-                .unwrap_or(0)
+        let added = self
+            .added
+            .get(&(topic.to_owned(), partition))
+            .copied()
+            .unwrap_or(0);
+        if self.created.contains_key(topic) {
+            return added;
+        }
+        HISTORY + self.elapsed_ms() / LIVE_STEP_MS + added
     }
 
     fn committed(&self, group: &Group, topic: &str, partition: i32) -> i64 {
@@ -275,20 +489,20 @@ impl Cluster {
 
     /// Returns the stored record, for showing in a running tail.
     pub(super) fn produce(&mut self, request: &ProduceRequest) -> Result<Record, String> {
-        let Some(topic_idx) = TOPICS.iter().position(|t| *t == request.topic) else {
+        let Some(partitions) = self.partitions_of(&request.topic) else {
             return Err(format!("topic {} does not exist", request.topic));
         };
         let partition = match request.partition {
-            Some(p) if (0..PARTITIONS).contains(&p) => p,
+            Some(p) if (0..partitions).contains(&p) => p,
             Some(p) => {
                 return Err(format!(
                     "topic {} has partitions 0 to {}; there is no partition {p}",
                     request.topic,
-                    PARTITIONS - 1
+                    partitions - 1
                 ));
             }
             None => request.key.as_deref().map_or(0, |k| {
-                (mix(k.iter().map(|&b| b as u64).sum()) % PARTITIONS as u64) as i32
+                (mix(k.iter().map(|&b| b as u64).sum()) % partitions as u64) as i32
             }),
         };
         let (value, value_decoded) = match &request.value {
@@ -310,7 +524,6 @@ impl Cluster {
             .added
             .entry((request.topic.clone(), partition))
             .or_default() += 1;
-        let _ = topic_idx;
         Ok(Record {
             topic: request.topic.clone(),
             partition,
@@ -332,7 +545,7 @@ impl Cluster {
         end: ReplayEnd,
     ) -> Result<ReplayPlan, String> {
         for topic in [source, target] {
-            if !TOPICS.contains(&topic) {
+            if self.partitions_of(topic).is_none() {
                 return Err(format!("topic {topic} does not exist"));
             }
         }

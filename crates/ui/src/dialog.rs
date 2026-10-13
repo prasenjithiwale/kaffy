@@ -3,7 +3,9 @@
 //! Every change follows the same path: the worker returns a plan, the dialog
 //! shows exactly what will happen, and nothing is sent until it is confirmed.
 
-use kaffy_kafka::{Operation, ProduceRequest, ReplayPlan, ReplayProgress, ResetPlan};
+use kaffy_kafka::{
+    DeleteRecordsPlan, NewTopic, Operation, ProduceRequest, ReplayPlan, ReplayProgress, ResetPlan,
+};
 
 #[derive(Debug, Clone)]
 pub enum Dialog {
@@ -35,6 +37,29 @@ pub enum Dialog {
     ReplayProgress {
         plan: ReplayPlan,
         progress: ReplayProgress,
+    },
+    CreateTopic {
+        spec: NewTopic,
+        confirm: Confirm,
+    },
+    /// Permanent: always confirmed by typing the topic name.
+    DeleteTopic {
+        topic: String,
+        partitions: usize,
+        confirm: Confirm,
+    },
+    /// Permanent: always confirmed by typing the topic name.
+    DeleteRecords {
+        plan: DeleteRecordsPlan,
+        confirm: Confirm,
+    },
+    ConfigChange {
+        topic: String,
+        name: String,
+        old: Option<String>,
+        /// `None` resets to the inherited value.
+        new: Option<String>,
+        confirm: Confirm,
     },
 }
 
@@ -73,6 +98,11 @@ impl Confirm {
             typed: String::new(),
             blocked: None,
         }
+    }
+
+    /// Always requires typing `name`, for changes that cannot be undone.
+    pub fn typed(name: &str) -> Self {
+        Self::new(true, name)
     }
 
     pub fn blocked(mut self, reason: impl Into<String>) -> Self {

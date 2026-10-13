@@ -14,6 +14,7 @@ use rdkafka::{Offset, TopicPartitionList};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
+use crate::admin::{self, Admin};
 use crate::groups::Groups;
 use crate::replay;
 use crate::{
@@ -49,6 +50,7 @@ pub fn spawn(profile: &Profile) -> Result<Worker, Error> {
         metadata,
         registry,
         producer: Arc::new(OnceLock::new()),
+        admin: Arc::new(OnceLock::new()),
         read_only: profile.read_only,
         events: event_tx,
     };
@@ -97,6 +99,8 @@ struct Context {
     registry: Option<Arc<Registry>>,
     /// Created on the first write, so read-only sessions never open one.
     producer: Arc<OnceLock<FutureProducer>>,
+    /// Created on first use, like the producer.
+    admin: Arc<OnceLock<Admin>>,
     read_only: bool,
     events: mpsc::Sender<Event>,
 }
@@ -110,6 +114,38 @@ impl Context {
             .create()
             .map_err(|e| format!("creating producer: {e}"))?;
         Ok(self.producer.get_or_init(|| producer).clone())
+    }
+
+    fn admin(&self) -> Result<&Admin, String> {
+        if let Some(admin) = self.admin.get() {
+            return Ok(admin);
+        }
+        let admin: Admin = self
+            .base
+            .create()
+            .map_err(|e| format!("creating admin client: {e}"))?;
+        Ok(self.admin.get_or_init(|| admin))
+    }
+
+    /// Runs async `work` that needs the admin client and reports its result.
+    fn with_admin<T, F>(
+        &self,
+        operation: Operation,
+        work: impl FnOnce(Context) -> F + Send + 'static,
+        to_event: impl FnOnce(T) -> Event + Send + 'static,
+    ) where
+        T: Send + 'static,
+        F: std::future::Future<Output = Result<T, String>> + Send + 'static,
+    {
+        let ctx = self.clone();
+        tokio::spawn(async move {
+            let events = ctx.events.clone();
+            let event = match work(ctx).await {
+                Ok(value) => to_event(value),
+                Err(message) => Event::Failed { operation, message },
+            };
+            let _ = events.send(event).await;
+        });
     }
 
     /// Runs blocking `work` off the async threads and reports its result.
@@ -323,6 +359,78 @@ async fn run(ctx: Context, mut commands: mpsc::UnboundedReceiver<Command>) {
                 if let Some((cancel, _)) = replay.take() {
                     let _ = cancel.send(());
                 }
+            }
+            Command::CreateTopic(spec) => {
+                if ctx.refuse_if_read_only(Operation::CreateTopic) {
+                    continue;
+                }
+                ctx.with_admin(
+                    Operation::CreateTopic,
+                    |ctx| async move {
+                        admin::create_topic(ctx.admin()?, &spec).await?;
+                        Ok(spec.name)
+                    },
+                    |name| Event::TopicCreated { name },
+                );
+            }
+            Command::DeleteTopic(name) => {
+                if ctx.refuse_if_read_only(Operation::DeleteTopic) {
+                    continue;
+                }
+                ctx.with_admin(
+                    Operation::DeleteTopic,
+                    |ctx| async move {
+                        admin::delete_topic(ctx.admin()?, &name).await?;
+                        Ok(name)
+                    },
+                    |name| Event::TopicDeleted { name },
+                );
+            }
+            Command::DescribeTopicConfig(topic) => {
+                ctx.with_admin(
+                    Operation::TopicConfig,
+                    |ctx| async move {
+                        let entries = admin::describe_config(ctx.admin()?, &topic).await?;
+                        Ok((topic, entries))
+                    },
+                    |(topic, entries)| Event::TopicConfig { topic, entries },
+                );
+            }
+            Command::AlterTopicConfig { topic, changes } => {
+                if ctx.refuse_if_read_only(Operation::AlterTopicConfig) {
+                    continue;
+                }
+                ctx.with_admin(
+                    Operation::AlterTopicConfig,
+                    |ctx| async move {
+                        let changed = admin::alter_config(ctx.admin()?, &topic, &changes).await?;
+                        Ok((topic, changed))
+                    },
+                    |(topic, changed)| Event::TopicConfigAltered { topic, changed },
+                );
+            }
+            Command::PlanDeleteRecords { topic, before } => {
+                let metadata = ctx.metadata.clone();
+                ctx.blocking(
+                    Operation::PlanDeleteRecords,
+                    move || admin::plan_delete_records(&metadata, &topic, before),
+                    Event::DeleteRecordsPlan,
+                );
+            }
+            Command::DeleteRecords { topic, offsets } => {
+                if ctx.refuse_if_read_only(Operation::DeleteRecords) {
+                    continue;
+                }
+                ctx.with_admin(
+                    Operation::DeleteRecords,
+                    |ctx| async move {
+                        let records =
+                            admin::delete_records(ctx.admin()?, &ctx.metadata, &topic, &offsets)
+                                .await?;
+                        Ok((topic, records))
+                    },
+                    |(topic, records)| Event::RecordsDeleted { topic, records },
+                );
             }
         }
     }

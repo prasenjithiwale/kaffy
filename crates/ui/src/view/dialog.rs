@@ -231,6 +231,125 @@ pub fn render(frame: &mut Frame, state: &AppState) {
                 confirm_line(confirm, "produce"),
             )
         }
+        Dialog::CreateTopic { spec, confirm } => {
+            let field = |name: &str, value: String| {
+                Line::from(vec![
+                    Span::styled(format!("{name:<20}"), theme::label()),
+                    Span::raw(value),
+                ])
+            };
+            let lines = vec![
+                field("Name", spec.name.clone()),
+                field("Partitions", spec.partitions.to_string()),
+                field("Replication factor", spec.replication.to_string()),
+                Line::raw(""),
+                Line::styled(
+                    "Other settings use the broker defaults; change them later with c on the topic.",
+                    theme::dim(),
+                ),
+            ];
+            (
+                format!("Create topic {}", spec.name),
+                lines,
+                confirm_line(confirm, "create"),
+            )
+        }
+        Dialog::DeleteTopic {
+            topic,
+            partitions,
+            confirm,
+        } => {
+            let lines = vec![
+                Line::raw(""),
+                Line::styled(
+                    format!(
+                        "This permanently deletes {topic} and all of its {partitions} partition(s)."
+                    ),
+                    theme::error(),
+                ),
+                Line::raw(
+                    "Consumers and producers of the topic will start failing. This cannot be undone.",
+                ),
+            ];
+            (
+                format!("Delete topic {topic}"),
+                lines,
+                confirm_line(confirm, "delete it"),
+            )
+        }
+        Dialog::DeleteRecords { plan, confirm } => {
+            let mut lines = vec![Line::styled(
+                format!(
+                    "{:>9} {:>14} {:>14} {:>14}",
+                    "Partition", "Starts at", "Will start at", "Deleted"
+                ),
+                theme::header_row(),
+            )];
+            for row in plan.rows.iter().take(MAX_ROWS) {
+                lines.push(Line::raw(format!(
+                    "{:>9} {:>14} {:>14} {:>14}",
+                    row.partition,
+                    thousands(row.low),
+                    thousands(row.new_low),
+                    thousands((row.new_low - row.low).max(0)),
+                )));
+            }
+            if plan.rows.len() > MAX_ROWS {
+                lines.push(Line::styled(
+                    format!("… and {} more partitions", plan.rows.len() - MAX_ROWS),
+                    theme::dim(),
+                ));
+            }
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(
+                format!(
+                    "{} record(s) will be permanently deleted. This cannot be undone.",
+                    thousands(plan.total())
+                ),
+                theme::error(),
+            ));
+            (
+                format!("Delete records from {}", plan.topic),
+                lines,
+                confirm_line(confirm, "delete them"),
+            )
+        }
+        Dialog::ConfigChange {
+            topic,
+            name,
+            old,
+            new,
+            confirm,
+        } => {
+            let shown = |v: &Option<String>| v.clone().unwrap_or_else(|| "(hidden)".to_owned());
+            let lines = vec![
+                Line::from(vec![
+                    Span::styled(format!("{:<10}", "Setting"), theme::label()),
+                    Span::raw(name.clone()),
+                ]),
+                Line::from(vec![
+                    Span::styled(format!("{:<10}", "Now"), theme::label()),
+                    Span::raw(shown(old)),
+                ]),
+                Line::from(vec![
+                    Span::styled(format!("{:<10}", "After"), theme::label()),
+                    match new {
+                        Some(v) => Span::styled(v.clone(), theme::warning()),
+                        None => Span::styled(
+                            "the inherited value (broker or default)",
+                            theme::warning(),
+                        ),
+                    },
+                ]),
+                Line::raw(""),
+                Line::styled("The topic's other settings stay as they are.", theme::dim()),
+            ];
+            (
+                format!("Change {topic}"),
+                lines,
+                confirm_line(confirm, "apply"),
+            )
+        }
         Dialog::ReplayProgress { plan, progress } => {
             let status = match (&progress.error, progress.done) {
                 (Some(e), _) => Line::styled(format!("Stopped: {e}"), theme::error()),

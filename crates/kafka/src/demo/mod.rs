@@ -13,10 +13,7 @@ use kaffy_schema::{AvroSchema, Decoded};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::{
-    Command, EVENT_BUFFER, Event, Header, Operation, PartitionInfo, Record, StartAt, TopicInfo,
-    Worker,
-};
+use crate::{Command, EVENT_BUFFER, Event, Header, Operation, Record, StartAt, Worker};
 
 mod ops;
 
@@ -57,12 +54,8 @@ async fn run(mut commands: mpsc::UnboundedReceiver<Command>, events: mpsc::Sende
         let lock = || cluster.lock().expect("demo cluster");
         match command {
             Command::ListTopics => {
-                let _ = events
-                    .send(Event::Metadata {
-                        brokers: 3,
-                        topics: topics(),
-                    })
-                    .await;
+                let topics = lock().topic_infos();
+                let _ = events.send(Event::Metadata { brokers: 3, topics }).await;
             }
             Command::Tail {
                 session,
@@ -72,16 +65,33 @@ async fn run(mut commands: mpsc::UnboundedReceiver<Command>, events: mpsc::Sende
                 if let Some((_, task)) = tail.take() {
                     task.abort();
                 }
-                let Some(topic_idx) = TOPICS.iter().position(|t| *t == topic) else {
+                let partitions = lock().partitions_of(&topic);
+                let Some(partitions) = partitions else {
                     let _ = events
                         .send(Event::Error(format!("tail {topic}: unknown topic")))
                         .await;
                     continue;
                 };
+                // Topics created in the demo exist but have no generated records.
+                let Some(topic_idx) = TOPICS.iter().position(|t| *t == topic) else {
+                    tailing = Some((session, topic.clone()));
+                    let _ = events
+                        .send(Event::TailStarted {
+                            session,
+                            partitions: partitions as usize,
+                        })
+                        .await;
+                    continue;
+                };
+                let lows: Vec<i64> = {
+                    let cluster = lock();
+                    (0..PARTITIONS).map(|p| cluster.low(&topic, p)).collect()
+                };
                 tailing = Some((session, topic.clone()));
                 let (control, control_rx) = mpsc::unbounded_channel();
                 let task = tokio::spawn(run_tail(
                     topic_idx,
+                    lows,
                     session,
                     start,
                     started_ms,
@@ -190,35 +200,55 @@ async fn run(mut commands: mpsc::UnboundedReceiver<Command>, events: mpsc::Sende
                     let _ = cancel.send(());
                 }
             }
+            Command::CreateTopic(spec) => {
+                let event = match lock().create_topic(&spec) {
+                    Ok(()) => Event::TopicCreated { name: spec.name },
+                    Err(e) => failed(Operation::CreateTopic, e),
+                };
+                let _ = events.send(event).await;
+            }
+            Command::DeleteTopic(name) => {
+                let event = match lock().delete_topic(&name) {
+                    Ok(()) => Event::TopicDeleted { name },
+                    Err(e) => failed(Operation::DeleteTopic, e),
+                };
+                let _ = events.send(event).await;
+            }
+            Command::DescribeTopicConfig(topic) => {
+                let event = match lock().describe_config(&topic) {
+                    Ok(entries) => Event::TopicConfig { topic, entries },
+                    Err(e) => failed(Operation::TopicConfig, e),
+                };
+                let _ = events.send(event).await;
+            }
+            Command::AlterTopicConfig { topic, changes } => {
+                let event = match lock().alter_config(&topic, &changes) {
+                    Ok(changed) => Event::TopicConfigAltered { topic, changed },
+                    Err(e) => failed(Operation::AlterTopicConfig, e),
+                };
+                let _ = events.send(event).await;
+            }
+            Command::PlanDeleteRecords { topic, before } => {
+                let event = match lock().plan_delete_records(&topic, before) {
+                    Ok(plan) => Event::DeleteRecordsPlan(plan),
+                    Err(e) => failed(Operation::PlanDeleteRecords, e),
+                };
+                let _ = events.send(event).await;
+            }
+            Command::DeleteRecords { topic, offsets } => {
+                let event = match lock().delete_records(&topic, &offsets) {
+                    Ok(records) => Event::RecordsDeleted { topic, records },
+                    Err(e) => failed(Operation::DeleteRecords, e),
+                };
+                let _ = events.send(event).await;
+            }
         }
     }
 }
 
-fn topics() -> Vec<TopicInfo> {
-    TOPICS
-        .iter()
-        .enumerate()
-        .map(|(i, name)| TopicInfo {
-            name: (*name).to_owned(),
-            partitions: (0..PARTITIONS)
-                .map(|id| PartitionInfo {
-                    id,
-                    leader: id % 3 + 1,
-                    replicas: vec![1, 2, 3],
-                    // One under-replicated partition, so the column has something to show.
-                    isr: if i == 3 && id == 1 {
-                        vec![1, 3]
-                    } else {
-                        vec![1, 2, 3]
-                    },
-                })
-                .collect(),
-        })
-        .collect()
-}
-
 async fn run_tail(
     topic_idx: usize,
+    lows: Vec<i64>,
     session: u64,
     start: StartAt,
     started_ms: i64,
@@ -249,6 +279,9 @@ async fn run_tail(
     };
     for offset in first..HISTORY {
         for partition in 0..PARTITIONS {
+            if offset < lows[partition as usize] {
+                continue; // deleted by DeleteRecords
+            }
             let ts = started_ms - (HISTORY - offset) * HISTORY_STEP_MS;
             let record = record(topic_idx, partition, offset, ts);
             if events
