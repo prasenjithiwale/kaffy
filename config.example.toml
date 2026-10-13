@@ -1,0 +1,27 @@
+# kaffy config. Copy to ~/.config/kaffy/config.toml (or point $KAFFY_CONFIG / --config at it).
+
+# Profile used when --profile is not given. Without it, the first profile (alphabetically) is used.
+default_profile = "local"
+
+[profiles.local]
+bootstrap_servers = "localhost:9092"
+# read_only defaults to true: write operations stay disabled until you opt in.
+read_only = false
+
+[profiles.staging]
+bootstrap_servers = "broker-1.staging:9094,broker-2.staging:9094"
+security_protocol = "sasl_ssl"          # plaintext | ssl | sasl_plaintext | sasl_ssl
+sasl = { mechanism = "SCRAM-SHA-512", username = "svc-kaffy", password_env = "KAFFY_STAGING_PASSWORD" }
+tls = { ca_location = "/etc/ssl/certs/staging-ca.pem" }
+schema_registry_url = "https://schema-registry.staging:8081"
+
+[profiles.prod-mtls]
+bootstrap_servers = "broker-1.prod:9093"
+security_protocol = "ssl"
+prod = true                              # shows a PROD badge; destructive ops will need typed confirmation
+tls = { ca_location = "/etc/kaffy/ca.pem", certificate_location = "/etc/kaffy/client.pem", key_location = "/etc/kaffy/client.key" }
+
+# Any librdkafka property can be set directly and overrides the settings above.
+[profiles.prod-mtls.librdkafka]
+"socket.timeout.ms" = "10000"
+"client.rack" = "eu-west-1a"

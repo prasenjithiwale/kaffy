@@ -1,0 +1,25 @@
+[package]
+name = "kaffy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "kaffy"
+path = "src/main.rs"
+
+[dependencies]
+kaffy-config.workspace = true
+kaffy-kafka.workspace = true
+kaffy-ui.workspace = true
+anyhow.workspace = true
+arboard.workspace = true
+clap.workspace = true
+crossterm.workspace = true
+dirs.workspace = true
+futures.workspace = true
+ratatui.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

@@ -1,0 +1,36 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+[workspace.dependencies]
+kaffy-config = { path = "crates/config" }
+kaffy-kafka = { path = "crates/kafka" }
+kaffy-schema = { path = "crates/schema" }
+kaffy-ui = { path = "crates/ui" }
+
+anyhow = "1"
+arboard = "3.6"
+chrono = "0.4"
+clap = { version = "4.6", features = ["derive"] }
+crossterm = { version = "0.29", features = ["event-stream"] }
+dirs = "7"
+futures = "0.3"
+ratatui = "0.30"
+rdkafka = { version = "0.39", features = ["cmake-build", "ssl-vendored", "tokio"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+toml = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+lto = "thin"
+strip = true
