@@ -18,6 +18,7 @@ use crate::dialog::{ChoicePurpose, Confirm, Dialog};
 use crate::export::{self, ExportFormat};
 use crate::filter::{Filter, Subject};
 use crate::groups::{GroupDetailView, GroupsView};
+use crate::schemas::{self, SchemasView, SubjectView};
 use crate::{fmt, template};
 
 /// Records kept per tail; older ones are dropped.
@@ -36,6 +37,8 @@ pub enum Screen {
     Groups,
     GroupDetail,
     TopicConfig,
+    Schemas,
+    SchemaDetail,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +56,7 @@ pub enum InputKind {
     NewTopicReplication,
     TruncateBefore,
     ConfigValue,
+    SubjectName,
 }
 
 impl InputKind {
@@ -75,6 +79,7 @@ impl InputKind {
                 "delete records before (an offset, a time like -7d, or end for all): "
             }
             Self::ConfigValue => "new value: ",
+            Self::SubjectName => "new subject (usually <topic>-value): ",
         }
     }
 }
@@ -103,6 +108,7 @@ enum Wizard {
         name: String,
         old: Option<String>,
     },
+    NewSubject,
 }
 
 /// The config screen of one topic.
@@ -118,6 +124,16 @@ pub struct TopicConfigView {
 struct Editing {
     template: String,
     fresh: bool,
+    purpose: EditPurpose,
+}
+
+#[derive(Debug, Clone)]
+enum EditPurpose {
+    Produce,
+    Schema {
+        subject: String,
+        schema_type: kaffy_kafka::SchemaType,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -176,6 +192,12 @@ pub enum Action {
     ResetConfig,
     /// Produce a tombstone for the selected message's key.
     Tombstone,
+    ShowSchemas,
+    /// Show the change from the previous schema version.
+    ToggleDiff,
+    /// Edit the latest schema and register the result as a new version.
+    EditSchema,
+    NewSubject,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -436,6 +458,8 @@ pub struct AppState {
     pub groups: GroupsView,
     pub group_detail: Option<GroupDetailView>,
     pub topic_config: Option<TopicConfigView>,
+    pub schemas: SchemasView,
+    pub subject: Option<SubjectView>,
     pub dialog: Option<Dialog>,
     pub show_help: bool,
     wizard: Option<Wizard>,
@@ -463,6 +487,8 @@ impl AppState {
             groups: GroupsView::default(),
             group_detail: None,
             topic_config: None,
+            schemas: SchemasView::default(),
+            subject: None,
             dialog: None,
             show_help: false,
             wizard: None,
@@ -651,8 +677,103 @@ impl AppState {
                 self.close_pending(Operation::DeleteRecords);
                 self.flash_info(format!("deleted {records} record(s) from {topic}"));
             }
+            Event::Subjects(list) => {
+                self.schemas.list = Some(list);
+                self.schemas.clamp_selection();
+            }
+            Event::SubjectDetail {
+                subject,
+                versions,
+                compatibility,
+            } => {
+                let view = self.subject.as_mut().filter(|v| v.subject == subject)?;
+                view.table.select(Some(versions.len().saturating_sub(1)));
+                view.versions = Some(versions);
+                view.compatibility = Some(compatibility);
+                return self.fetch_shown_versions();
+            }
+            Event::SchemaVersion(schema) => {
+                if let Some(view) = self
+                    .subject
+                    .as_mut()
+                    .filter(|v| v.subject == schema.subject)
+                {
+                    view.schemas.insert(schema.version, schema);
+                }
+            }
+            Event::SchemaChecked {
+                subject,
+                schema_type,
+                schema,
+                compatibility,
+            } => {
+                if self.pending(Operation::CheckSchema) {
+                    let latest = self
+                        .subject
+                        .as_ref()
+                        .filter(|v| v.subject == subject)
+                        .and_then(|v| v.latest())
+                        .map(|l| l.schema.clone());
+                    let diff = schemas::diff(schema_type, latest.as_deref().unwrap_or(""), &schema);
+                    let mut confirm = Confirm::new(self.prod, &subject);
+                    if !compatibility.compatible {
+                        confirm = confirm.blocked(
+                            "The registry would reject this schema; fix it and try again.",
+                        );
+                    }
+                    self.dialog = Some(Dialog::RegisterSchema {
+                        subject,
+                        schema_type,
+                        schema,
+                        is_new: latest.is_none(),
+                        diff,
+                        compatibility,
+                        confirm,
+                    });
+                }
+            }
+            Event::SchemaRegistered {
+                subject,
+                id,
+                version,
+            } => {
+                self.close_pending(Operation::RegisterSchema);
+                self.flash_info(format!(
+                    "registered {subject} version {version} (schema id {id})"
+                ));
+                return Some(match &self.subject {
+                    Some(view) if view.subject == subject => {
+                        Effect::Kafka(Command::DescribeSubject(subject))
+                    }
+                    _ => Effect::Kafka(Command::ListSubjects),
+                });
+            }
         }
         None
+    }
+
+    /// Fetches the selected version, and the one before it in diff mode, if not cached.
+    fn fetch_shown_versions(&mut self) -> Option<Effect> {
+        let view = self.subject.as_ref()?;
+        let mut wanted = vec![view.selected_version()?];
+        if view.diff {
+            wanted.extend(view.previous_version());
+        }
+        let effects: Vec<Effect> = wanted
+            .into_iter()
+            .filter(|v| !view.schemas.contains_key(v))
+            .map(|v| {
+                Effect::Kafka(Command::FetchSchema {
+                    subject: view.subject.clone(),
+                    version: Some(v),
+                })
+            })
+            .collect();
+        match effects.len() {
+            0 => None,
+            1 => effects.into_iter().next(),
+            _ => Some(Effect::Many(effects)),
+        }
     }
 
     fn close_pending(&mut self, operation: Operation) {
@@ -693,6 +814,7 @@ impl AppState {
             }
             Action::ShowTopics => self.show_topics(),
             Action::ShowGroups => self.show_groups(),
+            Action::ShowSchemas => self.show_schemas(),
             Action::BeginInput(kind) => {
                 let current = match kind {
                     InputKind::Filter => self.filter().to_owned(),
@@ -744,6 +866,8 @@ impl AppState {
                 Screen::Groups => self.update_groups(action),
                 Screen::GroupDetail => self.update_group_detail(action),
                 Screen::TopicConfig => self.update_topic_config(action),
+                Screen::Schemas => self.update_schemas(action),
+                Screen::SchemaDetail => self.update_subject(action),
             },
         }
     }
@@ -821,9 +945,14 @@ impl AppState {
         match self.screen {
             Screen::Topics => None,
             Screen::Messages | Screen::Detail => self.leave_tail(Screen::Topics),
-            Screen::Groups | Screen::GroupDetail | Screen::TopicConfig => {
+            Screen::Groups
+            | Screen::GroupDetail
+            | Screen::TopicConfig
+            | Screen::Schemas
+            | Screen::SchemaDetail => {
                 self.group_detail = None;
                 self.topic_config = None;
+                self.subject = None;
                 self.screen = Screen::Topics;
                 Some(Effect::Kafka(Command::ListTopics))
             }
@@ -834,9 +963,14 @@ impl AppState {
         let leave = match self.screen {
             Screen::Groups => return None,
             Screen::Messages | Screen::Detail => self.leave_tail(Screen::Groups),
-            Screen::Topics | Screen::GroupDetail | Screen::TopicConfig => None,
+            Screen::Topics
+            | Screen::GroupDetail
+            | Screen::TopicConfig
+            | Screen::Schemas
+            | Screen::SchemaDetail => None,
         };
         self.topic_config = None;
+        self.subject = None;
         self.screen = Screen::Groups;
         self.group_detail = None;
         self.groups.requested = Some(Instant::now());
@@ -845,6 +979,113 @@ impl AppState {
             Some(stop) => Effect::Many(vec![stop, list]),
             None => list,
         })
+    }
+
+    fn show_schemas(&mut self) -> Option<Effect> {
+        let leave = match self.screen {
+            Screen::Schemas => return None,
+            Screen::Messages | Screen::Detail => self.leave_tail(Screen::Schemas),
+            _ => None,
+        };
+        self.topic_config = None;
+        self.group_detail = None;
+        self.subject = None;
+        self.screen = Screen::Schemas;
+        let list = Effect::Kafka(Command::ListSubjects);
+        Some(match leave {
+            Some(stop) => Effect::Many(vec![stop, list]),
+            None => list,
+        })
+    }
+
+    fn update_schemas(&mut self, action: Action) -> Option<Effect> {
+        let len = self.schemas.visible().len();
+        let selected = self.schemas.table.selected().unwrap_or(0);
+        let table = &mut self.schemas.table;
+        let mut select = |i: usize| table.select(Some(i.min(len.saturating_sub(1))));
+        match action {
+            Action::Up => select(selected.saturating_sub(1)),
+            Action::Down => select(selected + 1),
+            Action::PageUp => select(selected.saturating_sub(10)),
+            Action::PageDown => select(selected + 10),
+            Action::Top => select(0),
+            Action::Bottom => select(len),
+            Action::Refresh => return Some(Effect::Kafka(Command::ListSubjects)),
+            Action::Back if !self.schemas.filter.is_empty() => self.set_filter(String::new()),
+            Action::Back => return self.show_topics(),
+            Action::Open => {
+                let subject = self.schemas.selected()?.subject.clone();
+                return Some(self.open_subject(subject));
+            }
+            Action::NewSubject => {
+                if self.check_writable("registering schemas") {
+                    self.wizard = Some(Wizard::NewSubject);
+                    return self.update(Action::BeginInput(InputKind::SubjectName));
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn open_subject(&mut self, subject: String) -> Effect {
+        self.subject = Some(SubjectView::new(subject.clone()));
+        self.screen = Screen::SchemaDetail;
+        Effect::Kafka(Command::DescribeSubject(subject))
+    }
+
+    fn update_subject(&mut self, action: Action) -> Option<Effect> {
+        let view = self.subject.as_mut()?;
+        let len = view.versions.as_ref().map_or(0, Vec::len);
+        let selected = view.table.selected().unwrap_or(len.saturating_sub(1));
+        let select = |view: &mut SubjectView, i: usize| {
+            view.table.select(Some(i.min(len.saturating_sub(1))));
+            view.scroll = 0;
+        };
+        match action {
+            Action::Up => select(view, selected.saturating_sub(1)),
+            Action::Down => select(view, selected + 1),
+            Action::Top => select(view, 0),
+            Action::Bottom => select(view, len),
+            Action::PageDown => view.scroll = view.scroll.saturating_add(10),
+            Action::PageUp => view.scroll = view.scroll.saturating_sub(10),
+            Action::ToggleDiff => {
+                view.diff = !view.diff;
+                view.scroll = 0;
+            }
+            Action::Refresh => {
+                return Some(Effect::Kafka(Command::DescribeSubject(
+                    view.subject.clone(),
+                )));
+            }
+            Action::Back => {
+                self.subject = None;
+                self.screen = Screen::Schemas;
+                return Some(Effect::Kafka(Command::ListSubjects));
+            }
+            Action::EditSchema => {
+                let Some(latest) = view.latest().cloned() else {
+                    self.flash_error("the latest version is still loading");
+                    return None;
+                };
+                if !self.check_writable("registering schemas") {
+                    return None;
+                }
+                let template =
+                    kaffy_schema::pretty_schema(latest.schema_type, &latest.schema) + "\n";
+                self.editing = Some(Editing {
+                    template: template.clone(),
+                    fresh: false,
+                    purpose: EditPurpose::Schema {
+                        subject: latest.subject,
+                        schema_type: latest.schema_type,
+                    },
+                });
+                return Some(Effect::Edit { template });
+            }
+            _ => return None,
+        }
+        self.fetch_shown_versions()
     }
 
     fn leave_tail(&mut self, to: Screen) -> Option<Effect> {
@@ -1069,7 +1310,8 @@ impl AppState {
                 | Dialog::CreateTopic { confirm, .. }
                 | Dialog::DeleteTopic { confirm, .. }
                 | Dialog::DeleteRecords { confirm, .. }
-                | Dialog::ConfigChange { confirm, .. },
+                | Dialog::ConfigChange { confirm, .. }
+                | Dialog::RegisterSchema { confirm, .. },
                 action,
             ) => {
                 let confirmed = match action {
@@ -1119,10 +1361,28 @@ impl AppState {
                 };
                 self.export(format)
             }
+            ChoicePurpose::NewSubjectType { subject } => {
+                let schema_type = match c {
+                    'j' => kaffy_kafka::SchemaType::Json,
+                    'p' => kaffy_kafka::SchemaType::Protobuf,
+                    _ => kaffy_kafka::SchemaType::Avro,
+                };
+                let template = schemas::skeleton(schema_type, &subject);
+                self.editing = Some(Editing {
+                    template: template.clone(),
+                    fresh: true,
+                    purpose: EditPurpose::Schema {
+                        subject,
+                        schema_type,
+                    },
+                });
+                Some(Effect::Edit { template })
+            }
             ChoicePurpose::TemplateError { text } => {
                 self.editing = Some(Editing {
                     template: text.clone(),
                     fresh: false,
+                    purpose: EditPurpose::Produce,
                 });
                 Some(Effect::Edit { template: text })
             }
@@ -1195,6 +1455,22 @@ impl AppState {
                     topic: plan.topic,
                 }))
             }
+            Dialog::RegisterSchema {
+                subject,
+                schema_type,
+                schema,
+                ..
+            } => {
+                self.dialog = Some(Dialog::Pending {
+                    title: format!("Registering a new version of {subject}…"),
+                    operation: Operation::RegisterSchema,
+                });
+                Some(Effect::Kafka(Command::RegisterSchema {
+                    subject,
+                    schema_type,
+                    schema,
+                }))
+            }
             Dialog::ConfigChange {
                 topic, name, new, ..
             } => {
@@ -1225,12 +1501,36 @@ impl AppState {
         self.editing = Some(Editing {
             template: template.clone(),
             fresh,
+            purpose: EditPurpose::Produce,
         });
         Some(Effect::Edit { template })
     }
 
     fn edited(&mut self, text: String) -> Option<Effect> {
         let editing = self.editing.take()?;
+        if let EditPurpose::Schema {
+            subject,
+            schema_type,
+        } = editing.purpose
+        {
+            if text.trim() == editing.template.trim() {
+                self.flash_info("nothing to register: the schema was not changed");
+                return None;
+            }
+            if text.trim().is_empty() {
+                self.flash_info("cancelled: the schema was left empty");
+                return None;
+            }
+            self.dialog = Some(Dialog::Pending {
+                title: format!("Checking compatibility with {subject}…"),
+                operation: Operation::CheckSchema,
+            });
+            return Some(Effect::Kafka(Command::CheckSchema {
+                subject,
+                schema_type,
+                schema: text,
+            }));
+        }
         if editing.fresh && text == editing.template {
             self.flash_info("nothing to produce: the template was not changed");
             return None;
@@ -1647,6 +1947,36 @@ impl AppState {
                 });
                 return None;
             }
+            (InputKind::SubjectName, Some(Wizard::NewSubject)) => {
+                if text.is_empty() || text.contains(char::is_whitespace) {
+                    self.flash_error("a subject name can't be empty or contain spaces");
+                    return None;
+                }
+                if self
+                    .schemas
+                    .list
+                    .iter()
+                    .flatten()
+                    .any(|s| s.subject == text)
+                {
+                    self.flash_error(format!(
+                        "{text} already exists; open it and press e to add a version"
+                    ));
+                    return None;
+                }
+                self.dialog = Some(Dialog::Choice {
+                    title: format!("Schema type for {text}:"),
+                    options: vec![
+                        ('a', "Avro".to_owned()),
+                        ('j', "JSON Schema".to_owned()),
+                        ('p', "Protobuf".to_owned()),
+                    ],
+                    purpose: ChoicePurpose::NewSubjectType {
+                        subject: text.to_owned(),
+                    },
+                });
+                return None;
+            }
             (_, wizard) => self.wizard = wizard,
         }
         let start = match input.kind {
@@ -1698,6 +2028,7 @@ impl AppState {
         match (self.screen, &self.tail) {
             (Screen::Messages | Screen::Detail, Some(tail)) => &tail.filter,
             (Screen::Groups | Screen::GroupDetail, _) => &self.groups.filter,
+            (Screen::Schemas | Screen::SchemaDetail, _) => &self.schemas.filter,
             _ => &self.topic_filter,
         }
     }
@@ -1708,6 +2039,10 @@ impl AppState {
             (Screen::Groups | Screen::GroupDetail, _) => {
                 self.groups.filter = value;
                 self.groups.clamp_selection();
+            }
+            (Screen::Schemas | Screen::SchemaDetail, _) => {
+                self.schemas.filter = value;
+                self.schemas.clamp_selection();
             }
             _ => {
                 self.topic_filter = value;
@@ -2513,6 +2848,210 @@ mod tests {
             (request.key.as_deref(), &request.value, request.partition),
             (Some(&b"k"[..]), &None, Some(0))
         );
+    }
+
+    fn subject_schema(version: i32, schema: &str) -> kaffy_kafka::SubjectSchema {
+        kaffy_kafka::SubjectSchema {
+            subject: "orders-value".into(),
+            version,
+            id: 10 + version as u32,
+            schema_type: kaffy_kafka::SchemaType::Avro,
+            schema: schema.into(),
+            references: Vec::new(),
+        }
+    }
+
+    const ORDER_V1: &str =
+        r#"{"type":"record","name":"Order","fields":[{"name":"id","type":"string"}]}"#;
+    const ORDER_V2: &str = r#"{"type":"record","name":"Order","fields":[{"name":"id","type":"string"},{"name":"n","type":"int","default":0}]}"#;
+
+    /// Opens orders-value with versions 1 and 2, the latest fetched.
+    fn open_subject(state: &mut AppState) {
+        assert_eq!(
+            state.update(Action::ShowSchemas),
+            Some(Effect::Kafka(Command::ListSubjects))
+        );
+        state.on_event(Event::Subjects(vec![subject_schema(2, ORDER_V2)]));
+        assert_eq!(
+            state.update(Action::Open),
+            Some(Effect::Kafka(Command::DescribeSubject(
+                "orders-value".into()
+            )))
+        );
+        assert_eq!(
+            state.on_event(Event::SubjectDetail {
+                subject: "orders-value".into(),
+                versions: vec![1, 2],
+                compatibility: "BACKWARD".into(),
+            }),
+            Some(Effect::Kafka(Command::FetchSchema {
+                subject: "orders-value".into(),
+                version: Some(2)
+            })),
+            "the latest version is fetched"
+        );
+        state.on_event(Event::SchemaVersion(subject_schema(2, ORDER_V2)));
+    }
+
+    #[test]
+    fn browse_and_diff_versions() {
+        let mut state = writable(false);
+        open_subject(&mut state);
+        assert_eq!(
+            state.update(Action::ToggleDiff),
+            Some(Effect::Kafka(Command::FetchSchema {
+                subject: "orders-value".into(),
+                version: Some(1)
+            })),
+            "diff needs the previous version"
+        );
+        state.on_event(Event::SchemaVersion(subject_schema(1, ORDER_V1)));
+        assert_eq!(state.update(Action::Up), None, "v1 is cached now");
+        assert_eq!(state.subject.as_ref().unwrap().selected_version(), Some(1));
+        assert_eq!(state.subject.as_ref().unwrap().previous_version(), None);
+    }
+
+    #[test]
+    fn edit_check_and_register() {
+        let mut state = writable(false);
+        open_subject(&mut state);
+        let Some(Effect::Edit { template }) = state.update(Action::EditSchema) else {
+            panic!("e opens the latest schema");
+        };
+        assert!(
+            template.contains("\"name\": \"n\""),
+            "pretty-printed: {template}"
+        );
+        assert_eq!(
+            state.update(Action::Edited(template.clone())),
+            None,
+            "unchanged: nothing to do"
+        );
+
+        state.update(Action::EditSchema);
+        let edited = template.replace("\"int\"", "\"long\"");
+        let Some(Effect::Kafka(Command::CheckSchema { schema, .. })) =
+            state.update(Action::Edited(edited.clone()))
+        else {
+            panic!("an edit is checked first");
+        };
+        assert_eq!(schema, edited);
+        state.on_event(Event::SchemaChecked {
+            subject: "orders-value".into(),
+            schema_type: kaffy_kafka::SchemaType::Avro,
+            schema,
+            compatibility: kaffy_kafka::Compatibility {
+                compatible: true,
+                messages: vec![],
+            },
+        });
+        let Some(Dialog::RegisterSchema { diff, is_new, .. }) = &state.dialog else {
+            panic!("review shown")
+        };
+        assert!(!is_new);
+        assert!(
+            diff.iter()
+                .any(|l| l.sign == '+' && l.text.contains("long"))
+        );
+        let Some(Effect::Kafka(Command::RegisterSchema { subject, .. })) =
+            state.update(Action::DialogKey('y'))
+        else {
+            panic!("y registers");
+        };
+        assert_eq!(
+            state.on_event(Event::SchemaRegistered {
+                subject,
+                id: 13,
+                version: 3
+            }),
+            Some(Effect::Kafka(Command::DescribeSubject(
+                "orders-value".into()
+            )))
+        );
+        assert!(state.flash.as_ref().unwrap().text.contains("version 3"));
+    }
+
+    #[test]
+    fn incompatible_schemas_cannot_be_registered() {
+        let mut state = writable(false);
+        open_subject(&mut state);
+        let Some(Effect::Edit { template }) = state.update(Action::EditSchema) else {
+            panic!()
+        };
+        let Some(Effect::Kafka(Command::CheckSchema { schema, .. })) =
+            state.update(Action::Edited(template.replace("\"id\"", "\"key\"")))
+        else {
+            panic!()
+        };
+        state.on_event(Event::SchemaChecked {
+            subject: "orders-value".into(),
+            schema_type: kaffy_kafka::SchemaType::Avro,
+            schema,
+            compatibility: kaffy_kafka::Compatibility {
+                compatible: false,
+                messages: vec!["READER_FIELD_MISSING_DEFAULT_VALUE: key".into()],
+            },
+        });
+        let Some(Dialog::RegisterSchema { confirm, .. }) = &state.dialog else {
+            panic!()
+        };
+        assert!(confirm.blocked.is_some());
+        assert_eq!(state.update(Action::DialogKey('y')), None);
+    }
+
+    #[test]
+    fn new_subject_wizard() {
+        let mut state = writable(false);
+        state.update(Action::ShowSchemas);
+        state.on_event(Event::Subjects(vec![subject_schema(2, ORDER_V2)]));
+        state.update(Action::NewSubject);
+        for c in "orders-value".chars() {
+            state.update(Action::InputChar(c));
+        }
+        state.update(Action::InputSubmit);
+        assert!(
+            state
+                .flash
+                .as_ref()
+                .unwrap()
+                .text
+                .contains("already exists")
+        );
+        state.update(Action::NewSubject);
+        for c in "payments-value".chars() {
+            state.update(Action::InputChar(c));
+        }
+        state.update(Action::InputSubmit);
+        let Some(Effect::Edit { template }) = state.update(Action::DialogKey('a')) else {
+            panic!("a picks Avro and opens a skeleton");
+        };
+        assert!(template.contains("\"name\": \"Payments\""));
+        let edited = template.replace("\"id\"", "\"payment_id\"");
+        assert!(matches!(
+            state.update(Action::Edited(edited)),
+            Some(Effect::Kafka(Command::CheckSchema { .. }))
+        ));
+        state.on_event(Event::SchemaChecked {
+            subject: "payments-value".into(),
+            schema_type: kaffy_kafka::SchemaType::Avro,
+            schema: "{}".into(),
+            compatibility: kaffy_kafka::Compatibility {
+                compatible: true,
+                messages: vec![],
+            },
+        });
+        let Some(Dialog::RegisterSchema { is_new, .. }) = &state.dialog else {
+            panic!()
+        };
+        assert!(is_new);
+    }
+
+    #[test]
+    fn read_only_profiles_cannot_register() {
+        let mut state = with_topics();
+        open_subject(&mut state);
+        assert_eq!(state.update(Action::EditSchema), None);
+        assert!(state.flash.as_ref().unwrap().text.contains("read-only"));
     }
 
     #[test]

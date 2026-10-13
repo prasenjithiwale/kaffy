@@ -5,6 +5,7 @@ pub mod export;
 pub mod filter;
 pub mod fmt;
 pub mod groups;
+pub mod schemas;
 pub mod state;
 pub mod template;
 mod theme;

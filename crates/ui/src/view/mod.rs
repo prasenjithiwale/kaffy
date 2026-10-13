@@ -3,6 +3,7 @@ mod detail;
 mod dialog;
 mod groups;
 mod messages;
+mod schemas;
 mod topics;
 
 use ratatui::Frame;
@@ -31,6 +32,8 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
         Screen::Groups => groups::render_list(frame, body, state),
         Screen::GroupDetail => groups::render_detail(frame, body, state),
         Screen::TopicConfig => config::render(frame, body, state),
+        Screen::Schemas => schemas::render_list(frame, body, state),
+        Screen::SchemaDetail => schemas::render_subject(frame, body, state),
     }
     render_footer(frame, footer, state);
     dialog::render(frame, state);
@@ -54,6 +57,24 @@ fn keys(screen: Screen) -> &'static [(&'static str, &'static str)] {
             ("?", "help"),
             ("q", "quit"),
             ("r", "refresh"),
+        ],
+        Screen::Schemas => &[
+            ("↑↓", "move"),
+            ("⏎", "open"),
+            ("n", "new subject"),
+            ("/", "filter"),
+            ("r", "refresh"),
+            ("?", "help"),
+            ("q", "quit"),
+        ],
+        Screen::SchemaDetail => &[
+            ("↑↓", "version"),
+            ("d", "diff with previous"),
+            ("e", "edit & register"),
+            ("PgUp/PgDn", "scroll"),
+            ("r", "refresh"),
+            ("?", "help"),
+            ("esc", "back"),
         ],
         Screen::TopicConfig => &[
             ("↑↓", "move"),
@@ -121,8 +142,8 @@ fn render_help(frame: &mut Frame, state: &AppState) {
     }));
     lines.push(Line::raw(""));
     lines.push(Line::from(vec![
-        Span::styled("  1 / 2   ", theme::key_hint()),
-        Span::raw("topics / consumer groups"),
+        Span::styled("  1 / 2 / 3 ", theme::key_hint()),
+        Span::raw("topics / consumer groups / schemas"),
     ]));
     lines.push(Line::from(vec![
         Span::styled("  ctrl-c  ", theme::key_hint()),
@@ -193,6 +214,12 @@ fn render_header(frame: &mut Frame, area: Rect, state: &AppState) {
             "2",
             "Groups",
             matches!(state.screen, Screen::Groups | Screen::GroupDetail),
+        ),
+        Span::raw("  "),
+        tab(
+            "3",
+            "Schemas",
+            matches!(state.screen, Screen::Schemas | Screen::SchemaDetail),
         ),
         Span::raw(" "),
     ])

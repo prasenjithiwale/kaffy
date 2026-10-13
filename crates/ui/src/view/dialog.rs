@@ -314,6 +314,52 @@ pub fn render(frame: &mut Frame, state: &AppState) {
                 confirm_line(confirm, "delete them"),
             )
         }
+        Dialog::RegisterSchema {
+            subject,
+            schema_type,
+            is_new,
+            diff,
+            compatibility,
+            confirm,
+            ..
+        } => {
+            let mut lines = vec![if compatibility.compatible {
+                Line::styled(
+                    if *is_new {
+                        format!("New subject, {} schema.", schema_type.label())
+                    } else {
+                        "The registry accepts this as the next version.".to_owned()
+                    },
+                    theme::ok(),
+                )
+            } else {
+                Line::styled("Not compatible with the latest version:", theme::error())
+            }];
+            if !compatibility.compatible {
+                // Verbose responses also echo the old schema and settings; keep the reasons.
+                let reasons = compatibility.messages.iter().filter(|m| {
+                    !(m.starts_with("{oldSchemaVersion")
+                        || m.starts_with("{oldSchema")
+                        || m.starts_with("{validateFields"))
+                });
+                for message in reasons.take(3) {
+                    lines.push(Line::styled(format!("  {message}"), theme::error()));
+                }
+            }
+            lines.push(Line::raw(""));
+            let shown = super::schemas::diff_lines(diff, if *is_new { None } else { Some(2) });
+            let more = shown.len().saturating_sub(MAX_ROWS * 2);
+            lines.extend(shown.into_iter().take(MAX_ROWS * 2));
+            if more > 0 {
+                lines.push(Line::styled(format!("… {more} more lines"), theme::dim()));
+            }
+            let title = if *is_new {
+                format!("Register {subject}")
+            } else {
+                format!("New version of {subject}")
+            };
+            (title, lines, confirm_line(confirm, "register"))
+        }
         Dialog::ConfigChange {
             topic,
             name,

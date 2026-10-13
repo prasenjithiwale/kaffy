@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 
 pub use client::spawn;
 pub use demo::spawn_demo;
-pub use kaffy_schema::Decoded;
+pub use kaffy_schema::{Compatibility, Decoded, SchemaType, SubjectSchema};
 
 /// Capacity of the event channel. When the UI falls behind, the consumer task
 /// waits instead of buffering without bound.
@@ -108,6 +108,27 @@ pub enum Command {
         topic: String,
         offsets: Vec<(i32, i64)>,
     },
+    /// The latest schema of every subject; answered with [`Event::Subjects`].
+    ListSubjects,
+    /// Versions and compatibility rule; answered with [`Event::SubjectDetail`].
+    DescribeSubject(String),
+    /// One version (`None` = latest); answered with [`Event::SchemaVersion`].
+    FetchSchema {
+        subject: String,
+        version: Option<i32>,
+    },
+    /// Answered with [`Event::SchemaChecked`].
+    CheckSchema {
+        subject: String,
+        schema_type: SchemaType,
+        schema: String,
+    },
+    /// Answered with [`Event::SchemaRegistered`].
+    RegisterSchema {
+        subject: String,
+        schema_type: SchemaType,
+        schema: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,6 +206,11 @@ pub enum Operation {
     AlterTopicConfig,
     PlanDeleteRecords,
     DeleteRecords,
+    ListSubjects,
+    DescribeSubject,
+    FetchSchema,
+    CheckSchema,
+    RegisterSchema,
 }
 
 /// Where an offset reset moves a group.
@@ -325,6 +351,24 @@ pub enum Event {
     RecordsDeleted {
         topic: String,
         records: i64,
+    },
+    Subjects(Vec<SubjectSchema>),
+    SubjectDetail {
+        subject: String,
+        versions: Vec<i32>,
+        compatibility: String,
+    },
+    SchemaVersion(SubjectSchema),
+    SchemaChecked {
+        subject: String,
+        schema_type: SchemaType,
+        schema: String,
+        compatibility: Compatibility,
+    },
+    SchemaRegistered {
+        subject: String,
+        id: u32,
+        version: i32,
     },
     /// A command failed; the UI closes whatever was waiting for it.
     Failed {

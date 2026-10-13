@@ -11,12 +11,16 @@ use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot};
 
-use super::{HISTORY, HISTORY_STEP_MS, PARTITIONS, TOPICS, mix, now_ms, record, sensor_schema};
+use super::{
+    HISTORY, HISTORY_STEP_MS, PARTITIONS, SENSOR_SCHEMA, SENSOR_SCHEMA_ID, TOPICS, mix, now_ms,
+    record, sensor_schema,
+};
 use crate::{
-    ConfigEntry, ConfigSource, DeleteRecordsPlan, Event, GroupDetail, GroupMember, GroupState,
-    GroupSummary, NewTopic, PartitionInfo, PartitionLag, PartitionOffset, PartitionRange, Payload,
-    ProduceRequest, Record, RecordFilter, ReplayEnd, ReplayPlan, ReplayProgress, ResetPlan,
-    ResetRow, ResetTarget, StartAt, TopicInfo, TruncateRow,
+    Compatibility, ConfigEntry, ConfigSource, DeleteRecordsPlan, Event, GroupDetail, GroupMember,
+    GroupState, GroupSummary, NewTopic, PartitionInfo, PartitionLag, PartitionOffset,
+    PartitionRange, Payload, ProduceRequest, Record, RecordFilter, ReplayEnd, ReplayPlan,
+    ReplayProgress, ResetPlan, ResetRow, ResetTarget, SchemaType, StartAt, SubjectSchema,
+    TopicInfo, TruncateRow,
 };
 
 /// Each partition gains a message about every 360 ms (3 partitions at 120 ms).
@@ -56,7 +60,13 @@ pub(super) struct Cluster {
     overrides: HashMap<String, BTreeMap<String, String>>,
     /// First offset kept per partition, moved by DeleteRecords.
     lows: HashMap<(String, i32), i64>,
+    /// The pretend Schema Registry: versions per subject, oldest first.
+    subjects: BTreeMap<String, Vec<SubjectSchema>>,
+    next_schema_id: u32,
 }
+
+/// sensor-readings before the battery field was added.
+const SENSOR_SCHEMA_V1: &str = r#"{"type":"record","name":"Reading","namespace":"demo.sensors","fields":[{"name":"sensor","type":"string"},{"name":"celsius","type":"double"},{"name":"state","type":{"type":"enum","name":"State","symbols":["OK","WARN","FAIL"]}}]}"#;
 
 /// Broker defaults shown for every demo topic.
 const DEFAULT_CONFIGS: [(&str, &str); 8] = [
@@ -141,6 +151,14 @@ impl Cluster {
                 BTreeMap::from([("retention.ms".to_owned(), "259200000".to_owned())]),
             )]),
             lows: HashMap::new(),
+            subjects: BTreeMap::from([(
+                "sensor-readings-value".to_owned(),
+                vec![
+                    demo_schema(1, SENSOR_SCHEMA_ID - 1, SENSOR_SCHEMA_V1),
+                    demo_schema(2, SENSOR_SCHEMA_ID, SENSOR_SCHEMA),
+                ],
+            )]),
+            next_schema_id: 100,
         }))
     }
 
@@ -308,6 +326,132 @@ impl Cluster {
             return Err("nothing to delete: no partition has records before that point".to_owned());
         }
         Ok(plan)
+    }
+
+    pub(super) fn latest_schemas(&self) -> Vec<SubjectSchema> {
+        self.subjects
+            .values()
+            .filter_map(|v| v.last().cloned())
+            .collect()
+    }
+
+    pub(super) fn describe_subject(&self, subject: &str) -> Result<(Vec<i32>, String), String> {
+        let versions = self.versions(subject)?;
+        Ok((
+            versions.iter().map(|s| s.version).collect(),
+            "BACKWARD".to_owned(),
+        ))
+    }
+
+    pub(super) fn fetch_schema(
+        &self,
+        subject: &str,
+        version: Option<i32>,
+    ) -> Result<SubjectSchema, String> {
+        let versions = self.versions(subject)?;
+        match version {
+            None => versions.last().cloned(),
+            Some(v) => versions.iter().find(|s| s.version == v).cloned(),
+        }
+        .ok_or_else(|| "schema registry: 404 Not Found: Version not found.".to_owned())
+    }
+
+    /// Validates, and for Avro applies the usual BACKWARD rule: a new field
+    /// needs a default, or old data can't be read with the new schema.
+    pub(super) fn check_schema(
+        &self,
+        subject: &str,
+        schema_type: SchemaType,
+        schema: &str,
+    ) -> Compatibility {
+        let invalid = |e: String| Compatibility {
+            compatible: false,
+            messages: vec![format!("Invalid schema: {e}")],
+        };
+        match schema_type {
+            SchemaType::Avro => {
+                if let Err(e) = kaffy_schema::AvroSchema::parse_str(schema) {
+                    return invalid(e.to_string());
+                }
+            }
+            SchemaType::Json => {
+                if let Err(e) = serde_json::from_str::<serde_json::Value>(schema) {
+                    return invalid(e.to_string());
+                }
+            }
+            SchemaType::Protobuf if schema.trim().is_empty() => {
+                return invalid("empty schema".to_owned());
+            }
+            SchemaType::Protobuf => {}
+        }
+        let Some(latest) = self.subjects.get(subject).and_then(|v| v.last()) else {
+            return Compatibility {
+                compatible: true,
+                messages: vec!["new subject: nothing to be compatible with yet".to_owned()],
+            };
+        };
+        let fields = |s: &str| -> Vec<serde_json::Value> {
+            serde_json::from_str::<serde_json::Value>(s)
+                .ok()
+                .and_then(|v| v.get("fields").and_then(|f| f.as_array()).cloned())
+                .unwrap_or_default()
+        };
+        let old: Vec<String> = fields(&latest.schema)
+            .iter()
+            .filter_map(|f| f.get("name").and_then(|n| n.as_str()).map(str::to_owned))
+            .collect();
+        let messages: Vec<String> = fields(schema)
+            .iter()
+            .filter(|f| f.get("default").is_none())
+            .filter_map(|f| f.get("name").and_then(|n| n.as_str()))
+            .filter(|name| !old.iter().any(|o| o == name))
+            .map(|name| {
+                format!(
+                    "READER_FIELD_MISSING_DEFAULT_VALUE: the field '{name}' in the new schema has no default value and is missing in the old schema"
+                )
+            })
+            .collect();
+        Compatibility {
+            compatible: messages.is_empty(),
+            messages,
+        }
+    }
+
+    pub(super) fn register_schema(
+        &mut self,
+        subject: &str,
+        schema_type: SchemaType,
+        schema: &str,
+    ) -> Result<(u32, i32), String> {
+        let check = self.check_schema(subject, schema_type, schema);
+        if !check.compatible {
+            return Err(format!(
+                "schema registry: 409 Conflict: {}",
+                check.messages.join("; ")
+            ));
+        }
+        let versions = self.subjects.entry(subject.to_owned()).or_default();
+        if let Some(same) = versions.iter().find(|s| s.schema == schema) {
+            return Ok((same.id, same.version));
+        }
+        let version = versions.last().map_or(1, |s| s.version + 1);
+        let id = self.next_schema_id;
+        self.next_schema_id += 1;
+        versions.push(SubjectSchema {
+            subject: subject.to_owned(),
+            version,
+            id,
+            schema_type,
+            schema: schema.to_owned(),
+            references: Vec::new(),
+        });
+        Ok((id, version))
+    }
+
+    fn versions(&self, subject: &str) -> Result<&Vec<SubjectSchema>, String> {
+        self.subjects.get(subject).ok_or_else(|| {
+            format!("schema registry: 404 Not Found: Subject '{subject}' not found.")
+        })
     }
 
     pub(super) fn delete_records(
@@ -662,4 +806,18 @@ pub(super) async fn replay(
     }
     progress.done = true;
     let _ = events.send(Event::ReplayProgress(progress)).await;
+}
+
+fn demo_schema(version: i32, id: u32, schema: &str) -> SubjectSchema {
+    SubjectSchema {
+        subject: "sensor-readings-value".to_owned(),
+        version,
+        id,
+        schema_type: SchemaType::Avro,
+        // Stored compact, the way a registry returns schemas.
+        schema: serde_json::from_str::<serde_json::Value>(schema)
+            .map(|v| v.to_string())
+            .unwrap_or_else(|_| schema.to_owned()),
+        references: Vec::new(),
+    }
 }

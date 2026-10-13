@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 
 use apache_avro::Schema as AvroSchema;
 use apache_avro::reader::datum::GenericDatumReader;
-use reqwest::Url;
-use reqwest::header::ACCEPT;
+use reqwest::header::{ACCEPT, CONTENT_TYPE};
+use reqwest::{Method, Url};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use tokio::sync::Mutex;
@@ -64,6 +64,8 @@ struct Reference {
 
 #[derive(Deserialize)]
 struct ErrorResponse {
+    #[serde(default)]
+    error_code: Option<i64>,
     message: String,
 }
 
@@ -179,36 +181,277 @@ impl Registry {
     }
 
     async fn get<T: DeserializeOwned>(&self, segments: &[&str]) -> Result<T, String> {
+        self.call(Method::GET, segments, &[], None)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn call<T: DeserializeOwned>(
+        &self,
+        method: Method,
+        segments: &[&str],
+        query: &[(&str, &str)],
+        body: Option<serde_json::Value>,
+    ) -> Result<T, ApiError> {
         let mut url = self.base.clone();
         url.path_segments_mut()
             .expect("checked in Registry::new")
             .pop_if_empty()
             .extend(segments);
+        if !query.is_empty() {
+            url.query_pairs_mut().extend_pairs(query);
+        }
 
-        let mut request = self.http.get(url.clone()).header(
+        let mut request = self.http.request(method, url.clone()).header(
             ACCEPT,
             "application/vnd.schemaregistry.v1+json, application/json",
         );
+        if let Some(body) = body {
+            request = request
+                .header(CONTENT_TYPE, "application/vnd.schemaregistry.v1+json")
+                .body(body.to_string());
+        }
         if let Some((user, password)) = &self.basic_auth {
             request = request.basic_auth(user, Some(password));
         }
-        let response = request
-            .send()
-            .await
-            .map_err(|e| format!("schema registry: {}", error_chain(&e)))?;
+        let response = request.send().await.map_err(|e| ApiError {
+            status: None,
+            code: None,
+            message: error_chain(&e),
+        })?;
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            let detail = serde_json::from_str::<ErrorResponse>(&body)
-                .map(|e| e.message)
-                .unwrap_or(body);
-            return Err(format!("schema registry: {status}: {}", detail.trim()));
+            let (code, message) = match serde_json::from_str::<ErrorResponse>(&body) {
+                Ok(e) => (e.error_code, e.message),
+                Err(_) => (None, body.trim().to_owned()),
+            };
+            return Err(ApiError {
+                status: Some(status),
+                code,
+                message,
+            });
         }
-        response
-            .json()
-            .await
-            .map_err(|e| format!("schema registry: unexpected response from {url}: {e}"))
+        response.json().await.map_err(|e| ApiError {
+            status: None,
+            code: None,
+            message: format!("unexpected response from {url}: {e}"),
+        })
     }
+
+    /// The latest schema of every subject, in one request where the registry
+    /// supports it.
+    pub async fn latest_schemas(&self) -> Result<Vec<SubjectSchema>, String> {
+        let all: Result<Vec<SchemaListing>, ApiError> = self
+            .call(Method::GET, &["schemas"], &[("latestOnly", "true")], None)
+            .await;
+        match all {
+            Ok(list) => {
+                let mut schemas: Vec<SubjectSchema> =
+                    list.into_iter().map(SubjectSchema::from).collect();
+                schemas.sort_by(|a, b| a.subject.cmp(&b.subject));
+                Ok(schemas)
+            }
+            // Older registries have no /schemas listing: fetch subject by subject.
+            Err(e) if e.status.is_some_and(|s| s.as_u16() == 404) => {
+                let subjects: Vec<String> = self.get(&["subjects"]).await?;
+                let mut schemas = Vec::new();
+                for subject in subjects {
+                    schemas.push(self.schema_version(&subject, None).await?);
+                }
+                schemas.sort_by(|a, b| a.subject.cmp(&b.subject));
+                Ok(schemas)
+            }
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    pub async fn subject_versions(&self, subject: &str) -> Result<Vec<i32>, String> {
+        self.get(&["subjects", subject, "versions"]).await
+    }
+
+    /// A version of `subject`; `None` is the latest.
+    pub async fn schema_version(
+        &self,
+        subject: &str,
+        version: Option<i32>,
+    ) -> Result<SubjectSchema, String> {
+        let version = version.map_or_else(|| "latest".to_owned(), |v| v.to_string());
+        let listing: SchemaListing = self
+            .get(&["subjects", subject, "versions", &version])
+            .await?;
+        Ok(listing.into())
+    }
+
+    /// The compatibility rule for `subject`, falling back to the global one.
+    pub async fn compatibility_level(&self, subject: &str) -> Result<String, String> {
+        let subject_level: Result<ConfigResponse, ApiError> = self
+            .call(
+                Method::GET,
+                &["config", subject],
+                &[("defaultToGlobal", "true")],
+                None,
+            )
+            .await;
+        match subject_level {
+            Ok(c) => Ok(c.compatibility_level),
+            Err(_) => {
+                let global: ConfigResponse = self.get(&["config"]).await?;
+                Ok(global.compatibility_level)
+            }
+        }
+    }
+
+    /// Whether `schema` could be registered as the next version of `subject`.
+    /// A subject with no versions accepts anything valid.
+    pub async fn check_compatibility(
+        &self,
+        subject: &str,
+        schema_type: SchemaType,
+        schema: &str,
+    ) -> Result<Compatibility, String> {
+        let body = schema_body(schema_type, schema);
+        let result: Result<CompatibilityResponse, ApiError> = self
+            .call(
+                Method::POST,
+                &["compatibility", "subjects", subject, "versions", "latest"],
+                &[("verbose", "true")],
+                Some(body),
+            )
+            .await;
+        match result {
+            Ok(r) => Ok(Compatibility {
+                compatible: r.is_compatible,
+                messages: r.messages,
+            }),
+            // 40401: subject not found, 40402: version not found.
+            Err(e) if matches!(e.code, Some(40401 | 40402)) => Ok(Compatibility {
+                compatible: true,
+                messages: vec!["new subject: nothing to be compatible with yet".to_owned()],
+            }),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// Registers `schema` under `subject` and returns its id and version.
+    pub async fn register(
+        &self,
+        subject: &str,
+        schema_type: SchemaType,
+        schema: &str,
+    ) -> Result<(u32, i32), String> {
+        let body = schema_body(schema_type, schema);
+        let _: RegisterResponse = self
+            .call(
+                Method::POST,
+                &["subjects", subject, "versions"],
+                &[],
+                Some(body.clone()),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        // Look the exact schema up to learn its version as well as its id.
+        let found: SchemaListing = self
+            .call(Method::POST, &["subjects", subject], &[], Some(body))
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok((found.id, found.version))
+    }
+}
+
+/// A failed registry call, with the registry's own error code when it gave one.
+#[derive(Debug)]
+struct ApiError {
+    status: Option<reqwest::StatusCode>,
+    code: Option<i64>,
+    message: String,
+}
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.status {
+            Some(status) => write!(f, "schema registry: {status}: {}", self.message),
+            None => write!(f, "schema registry: {}", self.message),
+        }
+    }
+}
+
+fn schema_body(schema_type: SchemaType, schema: &str) -> serde_json::Value {
+    let mut body = serde_json::json!({ "schema": schema });
+    if schema_type != SchemaType::Avro {
+        body["schemaType"] = serde_json::json!(schema_type.api_name());
+    }
+    body
+}
+
+/// One version of a subject.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubjectSchema {
+    pub subject: String,
+    pub version: i32,
+    pub id: u32,
+    pub schema_type: SchemaType,
+    pub schema: String,
+    pub references: Vec<SchemaReference>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct SchemaReference {
+    pub name: String,
+    pub subject: String,
+    pub version: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Compatibility {
+    pub compatible: bool,
+    /// The registry's explanation when incompatible.
+    pub messages: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SchemaListing {
+    subject: String,
+    version: i32,
+    id: u32,
+    #[serde(default)]
+    schema_type: Option<String>,
+    schema: String,
+    #[serde(default)]
+    references: Vec<SchemaReference>,
+}
+
+impl From<SchemaListing> for SubjectSchema {
+    fn from(l: SchemaListing) -> Self {
+        Self {
+            schema_type: SchemaType::from_api(l.schema_type.as_deref()),
+            subject: l.subject,
+            version: l.version,
+            id: l.id,
+            schema: l.schema,
+            references: l.references,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConfigResponse {
+    compatibility_level: String,
+}
+
+#[derive(Deserialize)]
+struct CompatibilityResponse {
+    is_compatible: bool,
+    #[serde(default)]
+    messages: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct RegisterResponse {
+    #[allow(dead_code)]
+    id: u32,
 }
 
 /// reqwest's top-level message ("error sending request") hides the cause.

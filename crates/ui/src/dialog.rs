@@ -4,8 +4,11 @@
 //! shows exactly what will happen, and nothing is sent until it is confirmed.
 
 use kaffy_kafka::{
-    DeleteRecordsPlan, NewTopic, Operation, ProduceRequest, ReplayPlan, ReplayProgress, ResetPlan,
+    Compatibility, DeleteRecordsPlan, NewTopic, Operation, ProduceRequest, ReplayPlan,
+    ReplayProgress, ResetPlan, SchemaType,
 };
+
+use crate::schemas::DiffLine;
 
 #[derive(Debug, Clone)]
 pub enum Dialog {
@@ -61,6 +64,16 @@ pub enum Dialog {
         new: Option<String>,
         confirm: Confirm,
     },
+    /// A schema checked against the registry, with its diff from the latest version.
+    RegisterSchema {
+        subject: String,
+        schema_type: SchemaType,
+        schema: String,
+        is_new: bool,
+        diff: Vec<DiffLine>,
+        compatibility: Compatibility,
+        confirm: Confirm,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,6 +88,9 @@ pub enum ChoicePurpose {
         topic: Option<String>,
     },
     ExportFormat,
+    NewSubjectType {
+        subject: String,
+    },
     /// The edited template did not parse.
     TemplateError {
         text: String,

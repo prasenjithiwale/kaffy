@@ -124,7 +124,7 @@ fn indented(text: String) -> Line<'static> {
 }
 
 /// Colors one line of pretty-printed JSON: keys, strings, numbers, literals.
-fn highlight_json(line: &str) -> Line<'static> {
+pub(super) fn highlight_json(line: &str) -> Line<'static> {
     let mut spans = Vec::new();
     let mut plain = String::new();
     let mut chars = line.char_indices().peekable();

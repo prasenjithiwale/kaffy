@@ -242,6 +242,57 @@ async fn run(mut commands: mpsc::UnboundedReceiver<Command>, events: mpsc::Sende
                 };
                 let _ = events.send(event).await;
             }
+            Command::ListSubjects => {
+                let subjects = lock().latest_schemas();
+                let _ = events.send(Event::Subjects(subjects)).await;
+            }
+            Command::DescribeSubject(subject) => {
+                let event = match lock().describe_subject(&subject) {
+                    Ok((versions, compatibility)) => Event::SubjectDetail {
+                        subject,
+                        versions,
+                        compatibility,
+                    },
+                    Err(e) => failed(Operation::DescribeSubject, e),
+                };
+                let _ = events.send(event).await;
+            }
+            Command::FetchSchema { subject, version } => {
+                let event = match lock().fetch_schema(&subject, version) {
+                    Ok(schema) => Event::SchemaVersion(schema),
+                    Err(e) => failed(Operation::FetchSchema, e),
+                };
+                let _ = events.send(event).await;
+            }
+            Command::CheckSchema {
+                subject,
+                schema_type,
+                schema,
+            } => {
+                let compatibility = lock().check_schema(&subject, schema_type, &schema);
+                let event = Event::SchemaChecked {
+                    subject,
+                    schema_type,
+                    schema,
+                    compatibility,
+                };
+                let _ = events.send(event).await;
+            }
+            Command::RegisterSchema {
+                subject,
+                schema_type,
+                schema,
+            } => {
+                let event = match lock().register_schema(&subject, schema_type, &schema) {
+                    Ok((id, version)) => Event::SchemaRegistered {
+                        subject,
+                        id,
+                        version,
+                    },
+                    Err(e) => failed(Operation::RegisterSchema, e),
+                };
+                let _ = events.send(event).await;
+            }
         }
     }
 }

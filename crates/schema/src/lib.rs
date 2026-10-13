@@ -10,7 +10,9 @@ mod registry;
 use std::fmt::Write as _;
 
 pub use apache_avro::Schema as AvroSchema;
-pub use registry::{Registry, decode_avro, encode_avro};
+pub use registry::{
+    Compatibility, Registry, SchemaReference, SubjectSchema, decode_avro, encode_avro,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
@@ -31,12 +33,40 @@ pub enum SchemaType {
 }
 
 impl SchemaType {
-    fn label(self) -> &'static str {
+    /// The registry's name for the type; Avro is the default when absent.
+    pub fn from_api(name: Option<&str>) -> Self {
+        match name {
+            Some("PROTOBUF") => Self::Protobuf,
+            Some("JSON") => Self::Json,
+            _ => Self::Avro,
+        }
+    }
+
+    pub fn api_name(self) -> &'static str {
+        match self {
+            Self::Avro => "AVRO",
+            Self::Json => "JSON",
+            Self::Protobuf => "PROTOBUF",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
         match self {
             Self::Avro => "avro",
             Self::Json => "json schema",
             Self::Protobuf => "protobuf",
         }
+    }
+}
+
+/// A schema formatted for reading and diffing: Avro and JSON Schema
+/// pretty-printed (keys in their original order), Protobuf as written.
+pub fn pretty_schema(schema_type: SchemaType, schema: &str) -> String {
+    match schema_type {
+        SchemaType::Avro | SchemaType::Json => serde_json::from_str::<serde_json::Value>(schema)
+            .map(|v| serde_json::to_string_pretty(&v).expect("a Value always serializes"))
+            .unwrap_or_else(|_| schema.to_owned()),
+        SchemaType::Protobuf => schema.trim_end().to_owned(),
     }
 }
 

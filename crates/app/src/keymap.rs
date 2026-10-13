@@ -45,6 +45,7 @@ pub fn map_key(state: &AppState, key: KeyEvent) -> Option<Action> {
         KeyCode::Char('?') => Some(Action::ToggleHelp),
         KeyCode::Char('1') => Some(Action::ShowTopics),
         KeyCode::Char('2') => Some(Action::ShowGroups),
+        KeyCode::Char('3') => Some(Action::ShowSchemas),
         KeyCode::Up | KeyCode::Char('k') => Some(Action::Up),
         KeyCode::Down | KeyCode::Char('j') => Some(Action::Down),
         KeyCode::PageUp => Some(Action::PageUp),
@@ -77,6 +78,14 @@ pub fn map_key(state: &AppState, key: KeyEvent) -> Option<Action> {
         ) => Some(Action::Refresh),
         (Screen::Groups | Screen::GroupDetail, KeyCode::Char('R')) => Some(Action::ResetOffsets),
         (Screen::Topics, KeyCode::Char('n')) => Some(Action::CreateTopic),
+        (Screen::Schemas, KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')) => {
+            Some(Action::Open)
+        }
+        (Screen::Schemas, KeyCode::Char('/')) => Some(Action::BeginInput(InputKind::Filter)),
+        (Screen::Schemas, KeyCode::Char('n')) => Some(Action::NewSubject),
+        (Screen::Schemas | Screen::SchemaDetail, KeyCode::Char('r')) => Some(Action::Refresh),
+        (Screen::SchemaDetail, KeyCode::Char('d')) => Some(Action::ToggleDiff),
+        (Screen::SchemaDetail, KeyCode::Char('e')) => Some(Action::EditSchema),
         (Screen::Topics, KeyCode::Char('D')) => Some(Action::DeleteTopic),
         (Screen::Topics, KeyCode::Char('T')) => Some(Action::Truncate),
         (Screen::Topics, KeyCode::Char('c')) => Some(Action::ShowConfig),

@@ -148,6 +148,14 @@ impl Context {
         });
     }
 
+    /// The profile's Schema Registry, or why there is none.
+    fn registry(&self) -> Result<Arc<Registry>, String> {
+        self.registry.clone().ok_or_else(|| {
+            "this profile has no Schema Registry: set schema_registry in its config, or pass --schema-registry"
+                .to_owned()
+        })
+    }
+
     /// Runs blocking `work` off the async threads and reports its result.
     fn blocking<T: Send + 'static>(
         &self,
@@ -366,7 +374,7 @@ async fn run(ctx: Context, mut commands: mpsc::UnboundedReceiver<Command>) {
                 }
                 ctx.with_admin(
                     Operation::CreateTopic,
-                    |ctx| async move {
+                    move |ctx| async move {
                         admin::create_topic(ctx.admin()?, &spec).await?;
                         Ok(spec.name)
                     },
@@ -379,7 +387,7 @@ async fn run(ctx: Context, mut commands: mpsc::UnboundedReceiver<Command>) {
                 }
                 ctx.with_admin(
                     Operation::DeleteTopic,
-                    |ctx| async move {
+                    move |ctx| async move {
                         admin::delete_topic(ctx.admin()?, &name).await?;
                         Ok(name)
                     },
@@ -389,7 +397,7 @@ async fn run(ctx: Context, mut commands: mpsc::UnboundedReceiver<Command>) {
             Command::DescribeTopicConfig(topic) => {
                 ctx.with_admin(
                     Operation::TopicConfig,
-                    |ctx| async move {
+                    move |ctx| async move {
                         let entries = admin::describe_config(ctx.admin()?, &topic).await?;
                         Ok((topic, entries))
                     },
@@ -402,7 +410,7 @@ async fn run(ctx: Context, mut commands: mpsc::UnboundedReceiver<Command>) {
                 }
                 ctx.with_admin(
                     Operation::AlterTopicConfig,
-                    |ctx| async move {
+                    move |ctx| async move {
                         let changed = admin::alter_config(ctx.admin()?, &topic, &changes).await?;
                         Ok((topic, changed))
                     },
@@ -423,13 +431,81 @@ async fn run(ctx: Context, mut commands: mpsc::UnboundedReceiver<Command>) {
                 }
                 ctx.with_admin(
                     Operation::DeleteRecords,
-                    |ctx| async move {
+                    move |ctx| async move {
                         let records =
                             admin::delete_records(ctx.admin()?, &ctx.metadata, &topic, &offsets)
                                 .await?;
                         Ok((topic, records))
                     },
                     |(topic, records)| Event::RecordsDeleted { topic, records },
+                );
+            }
+            Command::ListSubjects => ctx.with_admin(
+                Operation::ListSubjects,
+                move |ctx| async move { ctx.registry()?.latest_schemas().await },
+                Event::Subjects,
+            ),
+            Command::DescribeSubject(subject) => ctx.with_admin(
+                Operation::DescribeSubject,
+                move |ctx| async move {
+                    let registry = ctx.registry()?;
+                    let versions = registry.subject_versions(&subject).await?;
+                    let compatibility = registry.compatibility_level(&subject).await?;
+                    Ok((subject, versions, compatibility))
+                },
+                |(subject, versions, compatibility)| Event::SubjectDetail {
+                    subject,
+                    versions,
+                    compatibility,
+                },
+            ),
+            Command::FetchSchema { subject, version } => ctx.with_admin(
+                Operation::FetchSchema,
+                move |ctx| async move { ctx.registry()?.schema_version(&subject, version).await },
+                Event::SchemaVersion,
+            ),
+            Command::CheckSchema {
+                subject,
+                schema_type,
+                schema,
+            } => ctx.with_admin(
+                Operation::CheckSchema,
+                move |ctx| async move {
+                    let compatibility = ctx
+                        .registry()?
+                        .check_compatibility(&subject, schema_type, &schema)
+                        .await?;
+                    Ok((subject, schema_type, schema, compatibility))
+                },
+                |(subject, schema_type, schema, compatibility)| Event::SchemaChecked {
+                    subject,
+                    schema_type,
+                    schema,
+                    compatibility,
+                },
+            ),
+            Command::RegisterSchema {
+                subject,
+                schema_type,
+                schema,
+            } => {
+                if ctx.refuse_if_read_only(Operation::RegisterSchema) {
+                    continue;
+                }
+                ctx.with_admin(
+                    Operation::RegisterSchema,
+                    move |ctx| async move {
+                        let (id, version) = ctx
+                            .registry()?
+                            .register(&subject, schema_type, &schema)
+                            .await?;
+                        Ok((subject, id, version))
+                    },
+                    |(subject, id, version)| Event::SchemaRegistered {
+                        subject,
+                        id,
+                        version,
+                    },
                 );
             }
         }
