@@ -4,13 +4,15 @@
 //! cargo run -p kaffy-ui --example snapshot > screens.html
 //! ```
 //!
-//! Each screen becomes a `<pre class="tui">` of styled spans. Colors are emitted as
-//! classes (`fg-cyan`, `rev`, `dim`, ...) so the page's CSS decides the palette.
+//! Each screen becomes a `<pre class="tui">` of styled spans. True colors are
+//! inline styles; the 16 terminal colors are classes (`fg-cyan`, `rev`, `dim`, ...)
+//! so the page's CSS decides them. `KAFFY_THEME` picks the palette (dark by default).
 
 use std::fmt::Write as _;
 use std::time::Duration;
 
 use kaffy_kafka::{Command, Worker};
+use kaffy_ui::theme::ThemeName;
 use kaffy_ui::{Action, AppState, Effect, InputKind};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -22,6 +24,11 @@ const HEIGHT: u16 = 26;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    let theme = std::env::var("KAFFY_THEME")
+        .ok()
+        .and_then(|name| ThemeName::parse(&name))
+        .unwrap_or(ThemeName::Dark);
+    kaffy_ui::theme::init(theme);
     let mut worker = kaffy_kafka::spawn_demo();
     let mut state = AppState::new("demo", false, false);
     let mut screens = Vec::new();
@@ -138,6 +145,14 @@ async fn main() {
     settle(&mut worker, &mut state, 300).await;
     screens.push(("brokers", draw(&mut state)));
 
+    act(
+        &mut worker,
+        &mut state,
+        &[Action::ShowTopics, Action::ToggleHelp],
+    )
+    .await;
+    screens.push(("help", draw(&mut state)));
+
     for (name, html) in screens {
         println!("<pre class=\"tui\" data-screen=\"{name}\">{html}</pre>");
     }
@@ -192,7 +207,7 @@ fn draw(state: &mut AppState) -> String {
             if cell.symbol().is_empty() {
                 continue; // second half of a wide character
             }
-            let classes = classes(cell);
+            let classes = attributes(cell);
             if classes != run_classes {
                 flush(&mut html, &run_classes, &run_text);
                 run_classes = classes;
@@ -213,48 +228,58 @@ fn flush(html: &mut String, classes: &str, text: &str) {
     if classes.is_empty() {
         html.push_str(text);
     } else {
-        let _ = write!(html, "<span class=\"{classes}\">{text}</span>");
+        let _ = write!(html, "<span {classes}>{text}</span>");
     }
 }
 
-fn classes(cell: &Cell) -> String {
+/// The `class` and `style` attributes of a cell.
+fn attributes(cell: &Cell) -> String {
     let mut classes = Vec::new();
+    let mut styles = Vec::new();
     let (mut fg, mut bg) = (cell.fg, cell.bg);
     if cell.modifier.contains(Modifier::REVERSED) {
         std::mem::swap(&mut fg, &mut bg);
         classes.push("rev".to_owned());
     }
-    if let Some(name) = color_name(fg) {
-        classes.push(format!("fg-{name}"));
-    }
-    if let Some(name) = color_name(bg) {
-        classes.push(format!("bg-{name}"));
+    for (color, prefix, property) in [(fg, "fg", "color"), (bg, "bg", "background")] {
+        match color {
+            Color::Reset => {}
+            Color::Rgb(r, g, b) => styles.push(format!("{property}:#{r:02x}{g:02x}{b:02x}")),
+            named => classes.push(format!("{prefix}-{}", color_name(named))),
+        }
     }
     for (modifier, class) in [
         (Modifier::BOLD, "b"),
         (Modifier::DIM, "dim"),
+        (Modifier::ITALIC, "i"),
         (Modifier::UNDERLINED, "u"),
     ] {
         if cell.modifier.contains(modifier) {
             classes.push(class.to_owned());
         }
     }
-    classes.join(" ")
+    let mut out = Vec::new();
+    if !classes.is_empty() {
+        out.push(format!("class=\"{}\"", classes.join(" ")));
+    }
+    if !styles.is_empty() {
+        out.push(format!("style=\"{}\"", styles.join(";")));
+    }
+    out.join(" ")
 }
 
-fn color_name(color: Color) -> Option<&'static str> {
-    Some(match color {
-        Color::Reset => return None,
+fn color_name(color: Color) -> &'static str {
+    match color {
         Color::Black => "black",
-        Color::Red => "red",
-        Color::Green => "green",
-        Color::Yellow => "yellow",
-        Color::Blue => "blue",
-        Color::Magenta => "magenta",
-        Color::Cyan => "cyan",
-        Color::Gray | Color::White => "white",
+        Color::Red | Color::LightRed => "red",
+        Color::Green | Color::LightGreen => "green",
+        Color::Yellow | Color::LightYellow => "yellow",
+        Color::Blue | Color::LightBlue => "blue",
+        Color::Magenta | Color::LightMagenta => "magenta",
+        Color::Cyan | Color::LightCyan => "cyan",
+        Color::DarkGray => "gray",
         _ => "white",
-    })
+    }
 }
 
 fn escape_into(out: &mut String, text: &str) {

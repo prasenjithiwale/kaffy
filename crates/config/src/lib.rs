@@ -46,6 +46,8 @@ pub enum ConfigError {
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub default_profile: Option<String>,
+    /// Color theme: `dark`, `light` or `terminal` (16 colors). Detected when unset.
+    pub theme: Option<String>,
     #[serde(default)]
     pub profiles: BTreeMap<String, Profile>,
 }

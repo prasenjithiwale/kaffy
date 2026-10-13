@@ -10,6 +10,7 @@ use crossterm::event::{Event as TermEvent, EventStream, KeyEventKind};
 use futures::StreamExt;
 use kaffy_config::{Config, Profile, SchemaRegistry};
 use kaffy_kafka::{Command, Worker};
+use kaffy_ui::theme::ThemeName;
 use kaffy_ui::{Action, AppState, Effect};
 use ratatui::DefaultTerminal;
 
@@ -36,6 +37,10 @@ struct Args {
     #[arg(long, value_name = "URL")]
     schema_registry: Option<String>,
 
+    /// Colors: dark, light or terminal (16 colors) [default: $KAFFY_THEME, the config, else detected]
+    #[arg(long, value_name = "NAME")]
+    theme: Option<String>,
+
     /// Run against a built-in fake cluster; no broker needed
     #[arg(long, conflicts_with_all = ["profile", "bootstrap", "schema_registry"])]
     demo: bool,
@@ -46,6 +51,9 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let log_path = init_logging()?;
     tracing::info!(?args, "starting kaffy");
+    let theme = pick_theme(&args)?;
+    tracing::info!(?theme, "theme");
+    kaffy_ui::theme::init(theme);
 
     let (worker, state) = if args.demo {
         // The demo cluster is fake, so it accepts writes: try produce, replay and resets.
@@ -68,6 +76,30 @@ async fn main() -> Result<()> {
     let result = App::new(state, worker).run(&mut terminal).await;
     ratatui::restore();
     result.with_context(|| format!("kaffy failed; see the log at {}", log_path.display()))
+}
+
+/// `--theme`, then `$KAFFY_THEME`, then the config file's `theme`, else a guess
+/// from the terminal.
+fn pick_theme(args: &Args) -> Result<ThemeName> {
+    let parse = |name: &str, source: &str| {
+        ThemeName::parse(name).with_context(|| {
+            format!("unknown theme `{name}` in {source}; use dark, light or terminal")
+        })
+    };
+    if let Some(name) = &args.theme {
+        return parse(name, "--theme");
+    }
+    if let Ok(name) = std::env::var("KAFFY_THEME") {
+        return parse(&name, "$KAFFY_THEME");
+    }
+    let path = args.config.clone().or_else(Config::default_path);
+    // A broken config is reported when the profile is loaded; here it just means no theme.
+    if let Some(Ok(config)) = path.filter(|p| p.exists()).map(|p| Config::load(&p)) {
+        if let Some(name) = &config.theme {
+            return parse(name, "the config file");
+        }
+    }
+    Ok(ThemeName::detect())
 }
 
 fn resolve_profile(args: &Args) -> Result<Profile> {

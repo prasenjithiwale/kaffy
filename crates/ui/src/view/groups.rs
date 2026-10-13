@@ -3,7 +3,9 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Cell, Paragraph, Row, Sparkline, Table};
+use ratatui::widgets::{Cell, Paragraph, Row, Sparkline};
+
+use super::kit;
 
 use crate::groups::{HISTORY_LEN, REFRESH_EVERY};
 use crate::state::AppState;
@@ -17,34 +19,20 @@ pub fn render_list(frame: &mut Frame, area: Rect, state: &mut AppState) {
     let visible = view.visible();
     let total = view.list.as_ref().map_or(0, Vec::len);
 
-    let mut block = Block::bordered()
-        .title(Line::styled(
-            format!(" Consumer groups ({total}) "),
-            theme::title(),
-        ))
-        .title(
-            Line::styled(
-                format!(" lag refreshes every {}s ", REFRESH_EVERY.as_secs()),
-                theme::dim(),
-            )
-            .right_aligned(),
-        );
+    let mut block = kit::counted("Consumer groups", total).title(kit::note(
+        format!("↻ every {}s", REFRESH_EVERY.as_secs()),
+        theme::faint(),
+    ));
     if !view.filter.is_empty() {
-        block = block.title(
-            Line::styled(
-                format!(" filter: {} · {} match ", view.filter, visible.len()),
-                theme::warning(),
-            )
-            .right_aligned(),
-        );
+        block = block.title(kit::filter_note(&view.filter, visible.len()));
     }
     if visible.is_empty() {
         let inner = block.inner(area);
         frame.render_widget(block, area);
         let text = match &view.list {
-            None => "Loading consumer groups…",
+            None => "◌ Loading consumer groups…",
             Some(l) if l.is_empty() => "The cluster has no consumer groups yet",
-            Some(_) => "No groups match the filter",
+            Some(_) => "No groups match the filter · esc clears it",
         };
         super::placeholder(frame, inner, text);
         return;
@@ -65,41 +53,42 @@ pub fn render_list(frame: &mut Frame, area: Rect, state: &mut AppState) {
                 .unwrap_or_default();
             let rising = samples.is_some_and(|s| s.len() > 1 && s.back() > s.front());
             let lag = match group.lag {
-                Some(lag) => Cell::from(thousands(lag)).style(lag_style(lag, rising)),
-                None => Cell::from("?").style(theme::dim()),
+                Some(lag) => kit::num_styled(thousands(lag), lag_style(lag, rising)),
+                None => kit::num_styled("?", theme::faint()),
             };
             Row::new(vec![
                 Cell::from(group.name.clone()),
-                Cell::from(group.state.label().to_owned()).style(state_style(&group.state)),
-                Cell::from(group.members.to_string()),
-                Cell::from(group.topics.join(", ")),
+                Cell::from(state_chip(&group.state)),
+                kit::num(group.members.to_string()),
+                Cell::from(group.topics.join(", ")).style(theme::dim()),
                 lag,
                 Cell::from(trend).style(if rising {
                     theme::warning()
                 } else {
-                    theme::label()
+                    theme::accent()
                 }),
             ])
         })
         .collect();
-    let table = Table::new(
+    let table = kit::table(
         rows,
         [
             Constraint::Length(name_width),
-            Constraint::Length(11),
+            Constraint::Length(13),
             Constraint::Length(7),
             Constraint::Fill(1),
             Constraint::Length(10),
             Constraint::Length(TREND_LEN as u16),
         ],
     )
-    .header(
-        Row::new(["Group", "State", "Members", "Topics", "Lag", "Trend"])
-            .style(theme::header_row()),
-    )
-    .column_spacing(2)
-    .row_highlight_style(theme::selected())
-    .highlight_symbol("▶ ")
+    .header(kit::header([
+        kit::head("GROUP", false),
+        kit::head("STATE", false),
+        kit::head("MEMBERS", true),
+        kit::head("TOPICS", false),
+        kit::head("LAG", true),
+        kit::head("TREND", false),
+    ]))
     .block(block);
     frame.render_stateful_widget(table, area, &mut state.groups.table);
 }
@@ -109,11 +98,10 @@ pub fn render_detail(frame: &mut Frame, area: Rect, state: &mut AppState) {
         return;
     };
     let Some(detail) = view.detail.as_ref() else {
-        let block =
-            Block::bordered().title(Line::styled(format!(" {} ", view.name), theme::title()));
+        let block = kit::panel(view.name.clone());
         let inner = block.inner(area);
         frame.render_widget(block, area);
-        super::placeholder(frame, inner, "Loading offsets…");
+        super::placeholder(frame, inner, "◌ Loading offsets…");
         return;
     };
 
@@ -163,10 +151,7 @@ pub fn render_detail(frame: &mut Frame, area: Rect, state: &mut AppState) {
             .collect()
     };
     let mut lines = vec![
-        Line::from(vec![
-            label("State"),
-            Span::styled(detail.state.label().to_owned(), state_style(&detail.state)),
-        ]),
+        Line::from(vec![label("State"), state_chip(&detail.state)]),
         Line::from(vec![
             label("Total lag"),
             Span::styled(thousands(total), lag_style(total, false)),
@@ -175,36 +160,36 @@ pub fn render_detail(frame: &mut Frame, area: Rect, state: &mut AppState) {
     ];
     lines.extend(members);
     if matches!(detail.state, GroupState::Empty) {
-        lines.push(Line::styled(
-            "No members: offsets can be reset (R)",
-            theme::dim(),
-        ));
+        lines.push(Line::raw(""));
+        lines.push(Line::from(vec![
+            Span::styled("No members, so offsets can be reset with ", theme::faint()),
+            Span::styled("R", theme::key_hint()),
+        ]));
     }
     frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::bordered().title(Line::styled(format!(" {} ", view.name), theme::title())),
-        ),
+        Paragraph::new(lines).block(kit::panel(view.name.clone())),
         stats_area,
     );
 
     let chart_title = format!(
-        " Total lag, last {} refreshes ",
+        "Total lag, last {} refreshes",
         samples.len().min(HISTORY_LEN)
     );
     let max = samples.iter().copied().max().unwrap_or(0);
+    let min = samples.iter().copied().min().unwrap_or(0);
+    // Plot above a floor just under the minimum, so changes on a large lag show.
+    let floor = min.saturating_sub((max - min).max(max / 20).max(1));
+    let plotted: Vec<u64> = samples.iter().map(|&s| s - floor).collect();
     let chart = Sparkline::default()
-        .block(
-            Block::bordered()
-                .title(Line::styled(chart_title, theme::dim()))
-                .title(
-                    Line::styled(format!(" max {} ", thousands(max as i64)), theme::dim())
-                        .right_aligned(),
-                ),
-        )
-        .data(&samples)
-        .style(theme::label());
+        .block(kit::panel(chart_title).title(kit::note(
+            format!("{} – {}", thousands(min as i64), thousands(max as i64)),
+            theme::faint(),
+        )))
+        .data(&plotted)
+        .style(theme::accent());
     frame.render_widget(chart, chart_area);
 
+    let max_lag = detail.partitions.iter().map(|p| p.lag()).max().unwrap_or(0);
     let rows: Vec<Row> = detail
         .partitions
         .iter()
@@ -212,10 +197,11 @@ pub fn render_detail(frame: &mut Frame, area: Rect, state: &mut AppState) {
             let lag = p.lag();
             Row::new(vec![
                 Cell::from(p.topic.clone()),
-                Cell::from(p.partition.to_string()),
-                Cell::from(thousands(p.committed)),
-                Cell::from(thousands(p.end)),
-                Cell::from(thousands(lag)).style(lag_style(lag, false)),
+                kit::num_styled(p.partition.to_string(), theme::partition(p.partition)),
+                kit::num(thousands(p.committed)),
+                kit::num(thousands(p.end)),
+                kit::num_styled(thousands(lag), lag_style(lag, false)),
+                Cell::from(lag_bar(lag, max_lag, LAG_BAR)),
             ])
         })
         .collect();
@@ -226,7 +212,7 @@ pub fn render_detail(frame: &mut Frame, area: Rect, state: &mut AppState) {
         .max()
         .unwrap_or(5)
         .max(5) as u16;
-    let table = Table::new(
+    let table = kit::table(
         rows,
         [
             Constraint::Length(topic_width),
@@ -234,18 +220,18 @@ pub fn render_detail(frame: &mut Frame, area: Rect, state: &mut AppState) {
             Constraint::Length(14),
             Constraint::Length(14),
             Constraint::Length(12),
+            Constraint::Length(LAG_BAR as u16),
         ],
     )
-    .header(
-        Row::new(["Topic", "Partition", "Committed", "End offset", "Lag"])
-            .style(theme::header_row()),
-    )
-    .column_spacing(2)
-    .row_highlight_style(theme::selected())
-    .block(Block::bordered().title(Line::styled(
-        format!(" {} partition(s) ", detail.partitions.len()),
-        theme::dim(),
-    )));
+    .header(kit::header([
+        kit::head("TOPIC", false),
+        kit::head("PARTITION", true),
+        kit::head("COMMITTED", true),
+        kit::head("END OFFSET", true),
+        kit::head("LAG", true),
+        kit::head("", false),
+    ]))
+    .block(kit::counted("Partitions", detail.partitions.len()));
     frame.render_stateful_widget(table, bottom, &mut view.table);
 }
 
@@ -253,13 +239,15 @@ fn label(name: &str) -> Span<'static> {
     Span::styled(format!("{name:<10}"), theme::label())
 }
 
-pub(super) fn state_style(state: &GroupState) -> Style {
-    match state {
-        GroupState::Stable => theme::ok(),
-        GroupState::Empty => theme::warning(),
-        GroupState::Rebalancing => theme::json::literal(),
-        GroupState::Dead | GroupState::Other(_) => theme::dim(),
-    }
+/// The group's state with a glyph, so it reads without color too.
+fn state_chip(state: &GroupState) -> Span<'static> {
+    let (glyph, style) = match state {
+        GroupState::Stable => ("●", theme::ok()),
+        GroupState::Empty => ("○", theme::warning()),
+        GroupState::Rebalancing => ("◐", theme::special()),
+        GroupState::Dead | GroupState::Other(_) => ("✕", theme::faint()),
+    };
+    Span::styled(format!("{glyph} {}", state.label()), style)
 }
 
 fn lag_style(lag: i64, rising: bool) -> Style {
@@ -268,8 +256,23 @@ fn lag_style(lag: i64, rising: bool) -> Style {
     } else if rising {
         theme::warning()
     } else {
-        Style::new()
+        theme::text()
     }
+}
+
+/// Width of the per-partition lag bars.
+const LAG_BAR: usize = 16;
+
+/// `lag` as a bar scaled to `max`, on a faint track.
+fn lag_bar(lag: i64, max: i64, width: usize) -> Line<'static> {
+    if lag <= 0 || max <= 0 {
+        return Line::styled("✓ caught up", theme::ok());
+    }
+    let filled = ((lag as f64 / max as f64) * width as f64).round().max(1.0) as usize;
+    Line::from(vec![
+        Span::styled("━".repeat(filled.min(width)), theme::accent()),
+        Span::styled("─".repeat(width.saturating_sub(filled)), theme::faint()),
+    ])
 }
 
 /// `1234567` → `1,234,567`.

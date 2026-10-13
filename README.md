@@ -63,6 +63,14 @@ The schemas tab (`3`) lists every subject with its type and latest version. A su
 for compatibility (with the registry's explanation when it isn't), shown as a diff, and registered only once
 you confirm. `n` registers a new subject from an Avro, JSON Schema or Protobuf starting point.
 
+## Themes
+
+kaffy has its own dark and light color themes, and a `terminal` theme that uses your terminal's 16 colors.
+On terminals that support true color (`COLORTERM=truecolor`, or iTerm2, WezTerm, Ghostty, VS Code, Warp)
+it picks dark, or light when the terminal reports a light background (`COLORFGBG`); elsewhere, such as
+macOS Terminal, it uses `terminal`. Choose one with `--theme dark|light|terminal`, `$KAFFY_THEME`, or
+`theme = "light"` at the top of the config file.
+
 ## Keys
 
 Press `?` on any screen for its keys. `1`, `2`, `3` and `4` switch between topics, consumer groups, schemas

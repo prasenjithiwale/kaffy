@@ -2,7 +2,9 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
+
+use super::kit;
 
 use crate::fmt;
 use crate::state::AppState;
@@ -35,8 +37,8 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut AppState) {
             let first = key_lines.next().unwrap_or_default().to_owned();
             lines.push(Line::from(vec![
                 label("Key"),
-                Span::raw(first),
-                Span::styled(format!("  ({})", key.label), theme::dim()),
+                Span::styled(first, theme::info()),
+                Span::styled(format!("  ({})", key.label), theme::faint()),
             ]));
             lines.extend(key_lines.map(|l| indented(l.to_owned())));
         }
@@ -77,8 +79,8 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut AppState) {
         Some(value) => {
             let size = record.value.as_ref().map_or(0, Vec::len);
             lines.push(Line::from(vec![
-                Span::styled("Value", theme::title()),
-                Span::styled(format!("  ({}, {size} bytes)", value.label), theme::dim()),
+                Span::styled("VALUE", theme::header_row()),
+                Span::styled(format!("  ({}, {size} bytes)", value.label), theme::faint()),
             ]));
             lines.push(Line::raw(""));
             if value.json {
@@ -88,8 +90,8 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut AppState) {
             }
         }
         None => lines.push(Line::from(vec![
-            Span::styled("Value", theme::title()),
-            Span::styled("  ∅ null (tombstone)", theme::dim()),
+            Span::styled("VALUE", theme::header_row()),
+            Span::styled("  ∅ null (tombstone)", theme::faint()),
         ])),
     }
 
@@ -97,12 +99,9 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut AppState) {
     let max_scroll = lines.len().saturating_sub(1) as u16;
     detail.scroll = detail.scroll.min(max_scroll);
 
-    let block = Block::bordered().title(Line::styled(
-        format!(
-            " {} · p{} · offset {} ",
-            record.topic, record.partition, record.offset
-        ),
-        theme::title(),
+    let block = kit::panel(format!(
+        "{} · p{} · offset {}",
+        record.topic, record.partition, record.offset
     ));
     let paragraph = Paragraph::new(Text::from(lines))
         .block(block)

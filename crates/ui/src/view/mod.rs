@@ -3,21 +3,21 @@ mod config;
 mod detail;
 mod dialog;
 mod groups;
+mod kit;
 mod messages;
 mod schemas;
 mod topics;
 
 use ratatui::Frame;
-use ratatui::layout::Flex;
-use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::Color;
+use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, Paragraph};
+use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
 
 use crate::state::{AppState, Connection, InputKind, Screen};
 use crate::theme;
 
 pub fn render(frame: &mut Frame, state: &mut AppState) {
+    frame.render_widget(Block::new().style(theme::base()), frame.area());
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
@@ -55,7 +55,6 @@ fn keys(screen: Screen) -> &'static [(&'static str, &'static str)] {
             ("n", "new topic"),
             ("D", "delete"),
             ("T", "delete records"),
-            ("2", "consumer groups"),
             ("?", "help"),
             ("q", "quit"),
             ("r", "refresh"),
@@ -118,7 +117,6 @@ fn keys(screen: Screen) -> &'static [(&'static str, &'static str)] {
             ("⏎", "open"),
             ("R", "reset offsets"),
             ("/", "filter"),
-            ("1", "topics"),
             ("r", "refresh"),
             ("?", "help"),
             ("q", "quit"),
@@ -126,7 +124,6 @@ fn keys(screen: Screen) -> &'static [(&'static str, &'static str)] {
         Screen::Brokers => &[
             ("↑↓", "move"),
             ("r", "refresh"),
-            ("1", "topics"),
             ("?", "help"),
             ("q", "quit"),
         ],
@@ -140,67 +137,101 @@ fn keys(screen: Screen) -> &'static [(&'static str, &'static str)] {
     }
 }
 
+/// The tabs, with the screens each one covers.
+const TABS: [(&str, &str); 4] = [
+    ("1", "Topics"),
+    ("2", "Groups"),
+    ("3", "Schemas"),
+    ("4", "Brokers"),
+];
+
+fn active_tab(screen: Screen) -> &'static str {
+    match screen {
+        Screen::Topics | Screen::Messages | Screen::Detail | Screen::TopicConfig => "1",
+        Screen::Groups | Screen::GroupDetail => "2",
+        Screen::Schemas | Screen::SchemaDetail => "3",
+        Screen::Brokers => "4",
+    }
+}
+
 fn render_help(frame: &mut Frame, state: &AppState) {
+    const EVERYWHERE: [(&str, &str); 4] = [
+        ("1-4", "topics, consumer groups, schemas, brokers"),
+        ("g / G", "first / last row"),
+        ("PgUp/PgDn", "page"),
+        ("ctrl-c", "quit from anywhere"),
+    ];
     let keys = keys(state.screen);
-    let mut lines = vec![Line::raw("")];
-    lines.extend(keys.iter().map(|(key, label)| {
+    let key_width = keys
+        .iter()
+        .chain(&EVERYWHERE)
+        .map(|(k, _)| k.chars().count())
+        .max()
+        .unwrap_or(4)
+        + 2;
+    let row = |(key, label): &(&str, &str)| {
         Line::from(vec![
-            Span::styled(format!("  {key:<8}"), theme::key_hint()),
-            Span::raw(*label),
+            Span::styled(format!(" {key:<key_width$}"), theme::key_hint()),
+            Span::styled(label.to_string(), theme::text()),
         ])
-    }));
+    };
+    let section = |name: &str| Line::styled(name.to_uppercase(), theme::header_row());
+    let mut lines = vec![section("This screen")];
+    lines.extend(keys.iter().map(row));
     lines.push(Line::raw(""));
-    lines.push(Line::from(vec![
-        Span::styled("  1 / 2 / 3 ", theme::key_hint()),
-        Span::raw("topics / consumer groups / schemas"),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("  ctrl-c  ", theme::key_hint()),
-        Span::raw("quit from anywhere"),
-    ]));
+    lines.push(section("Everywhere"));
+    lines.extend(EVERYWHERE.iter().map(row));
     lines.push(Line::raw(""));
-    lines.push(Line::styled("  Press any key to close", theme::dim()));
+    lines.push(Line::styled("Press any key to close", theme::faint()).centered());
 
     let area = frame.area();
     let width = (lines.iter().map(Line::width).max().unwrap_or(30) as u16 + 6).min(area.width);
     let height = (lines.len() as u16 + 2).min(area.height);
-    let [popup] = Layout::vertical([Constraint::Length(height)])
-        .flex(Flex::Center)
-        .areas(area);
-    let [popup] = Layout::horizontal([Constraint::Length(width)])
-        .flex(Flex::Center)
-        .areas(popup);
+    let popup = centered(area, width, height);
     frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new(lines).block(
+        Paragraph::new(lines).style(theme::raised()).block(
             Block::bordered()
-                .border_style(theme::label())
+                .border_type(BorderType::Rounded)
+                .border_style(theme::border_focus())
+                .padding(Padding::horizontal(1))
                 .title(Line::styled(" Keys ", theme::title())),
         ),
         popup,
     );
 }
 
+pub(super) fn centered(area: Rect, width: u16, height: u16) -> Rect {
+    let [popup] = Layout::vertical([Constraint::Length(height)])
+        .flex(Flex::Center)
+        .areas(area);
+    let [popup] = Layout::horizontal([Constraint::Length(width)])
+        .flex(Flex::Center)
+        .areas(popup);
+    popup
+}
+
 fn render_header(frame: &mut Frame, area: Rect, state: &AppState) {
+    frame.render_widget(Block::new().style(theme::bar()), area);
+    let sep = || Span::styled("  ", theme::faint());
     let mut spans = vec![
-        Span::styled(" kaffy ", theme::badge(theme::ACCENT)),
+        Span::styled(" ◆ kaffy ", theme::badge(theme::accent_color())),
         Span::raw(" "),
-        Span::styled("profile ", theme::dim()),
-        Span::raw(state.profile.clone()),
-        Span::raw(" "),
+        Span::styled(state.profile.clone(), theme::title()),
+        sep(),
     ];
     if state.prod {
-        spans.push(Span::styled(" PROD ", theme::badge(Color::Red)));
+        spans.push(Span::styled(" PROD ", theme::badge(theme::err_color())));
         spans.push(Span::raw(" "));
     }
     spans.push(if state.read_only {
-        Span::styled(" READ-ONLY ", theme::badge(Color::Yellow))
+        Span::styled("◌ READ-ONLY", theme::warning())
     } else {
-        Span::styled(" WRITE ", theme::badge(Color::Magenta))
+        Span::styled("✎ WRITE", theme::special())
     });
-    spans.push(Span::styled("  │  ", theme::dim()));
+    spans.push(sep());
     spans.push(match state.connection {
-        Connection::Connecting => Span::styled("● connecting…", theme::warning()),
+        Connection::Connecting => Span::styled("◌ connecting…", theme::warning()),
         Connection::Connected { brokers } => Span::styled(
             format!(
                 "● connected · {brokers} broker{}",
@@ -210,47 +241,30 @@ fn render_header(frame: &mut Frame, area: Rect, state: &AppState) {
         ),
     });
     if let Some(tail) = &state.tail {
-        spans.push(Span::styled("  │  ", theme::dim()));
+        spans.push(sep());
         spans.push(Span::styled("topic ", theme::dim()));
-        spans.push(Span::styled(tail.topic.clone(), theme::title()));
+        spans.push(Span::styled(tail.topic.clone(), theme::accent()));
     }
     let left = Line::from(spans);
 
-    let tabs = [
-        (
-            "1",
-            "Topics",
-            matches!(
-                state.screen,
-                Screen::Topics | Screen::Messages | Screen::Detail | Screen::TopicConfig
-            ),
-        ),
-        (
-            "2",
-            "Groups",
-            matches!(state.screen, Screen::Groups | Screen::GroupDetail),
-        ),
-        (
-            "3",
-            "Schemas",
-            matches!(state.screen, Screen::Schemas | Screen::SchemaDetail),
-        ),
-        ("4", "Brokers", state.screen == Screen::Brokers),
-    ];
+    let active = active_tab(state.screen);
     let tab_line = |compact: bool| {
         let mut spans = Vec::new();
-        for (key, label, active) in tabs {
-            if !spans.is_empty() {
-                spans.push(Span::raw("  "));
-            }
+        for (key, label) in TABS {
+            let is_active = key == active;
             // Short of room, only the active tab keeps its name.
-            spans.push(tab(
-                key,
-                if compact && !active { "" } else { label },
-                active,
-            ));
+            let text = if compact && !is_active {
+                format!(" {key} ")
+            } else {
+                format!(" {key} {label} ")
+            };
+            spans.push(if is_active {
+                Span::styled(text, theme::badge(theme::accent_color()))
+            } else {
+                Span::styled(text, theme::dim())
+            });
+            spans.push(Span::raw(" "));
         }
-        spans.push(Span::raw(" "));
         Line::from(spans).right_aligned()
     };
     let mut right = tab_line(false);
@@ -262,15 +276,16 @@ fn render_header(frame: &mut Frame, area: Rect, state: &AppState) {
 }
 
 fn render_footer(frame: &mut Frame, area: Rect, state: &AppState) {
+    frame.render_widget(Block::new().style(theme::bar()), area);
     if let Some(input) = &state.input {
         let filtering_messages = input.kind == InputKind::Filter && state.screen != Screen::Topics;
         let right_text: Line = match state.tail.as_ref().and_then(|t| t.filter_error()) {
             Some(error) if filtering_messages => Line::styled(format!("{error} "), theme::error()),
             _ if filtering_messages && input.buffer.is_empty() => Line::styled(
                 "word  ~regex  key:  value:  h:  p:0,2  after:-15m  before:  !not ",
-                theme::dim(),
+                theme::faint(),
             ),
-            _ => Line::from(hints(&[("⏎", "apply"), ("esc", "cancel")])),
+            _ => Line::from(kit::key_hints(&[("⏎", "apply"), ("esc", "cancel")])),
         };
         let [left, right] = Layout::horizontal([
             Constraint::Min(0),
@@ -278,60 +293,56 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &AppState) {
         ])
         .areas(area);
         let line = Line::from(vec![
-            Span::styled(input.kind.prompt(), theme::key_hint()),
-            Span::raw(input.buffer.clone()),
+            Span::styled(
+                format!(" {} ", input.kind.prompt().trim_end()),
+                theme::key_chip(),
+            ),
+            Span::raw(" "),
+            Span::styled(input.buffer.clone(), theme::text()),
             Span::styled("▏", theme::key_hint()),
         ]);
         frame.render_widget(line, left);
         frame.render_widget(right_text.right_aligned(), right);
         return;
     }
-    if let Some(flash) = &state.flash {
-        let style = if flash.error {
-            theme::error()
+
+    // A message, if any, takes the right; keys fill what is left.
+    let toast = state.flash.as_ref().map(|flash| {
+        let (icon, style) = if flash.error {
+            ("✗", theme::error())
         } else {
-            theme::ok()
+            ("✓", theme::ok())
         };
-        frame.render_widget(
-            Paragraph::new(Span::styled(flash.text.clone(), style)),
-            area,
-        );
-        return;
+        Line::styled(format!("{icon} {} ", flash.text), style).right_aligned()
+    });
+    let toast_width = toast.as_ref().map_or(0, Line::width) as u16;
+    let [left, right] =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(toast_width)]).areas(area);
+    if let Some(toast) = toast {
+        frame.render_widget(toast, right);
     }
-    // The footer shows the common keys; ? lists them all.
-    let keys = &keys(state.screen)[..keys(state.screen).len().min(10)];
-    frame.render_widget(Line::from(hints(keys)), area);
-}
-
-fn tab(key: &str, label: &str, active: bool) -> Span<'static> {
-    let text = if label.is_empty() {
-        format!(" {key} ")
-    } else {
-        format!(" {key} {label} ")
-    };
-    Span::styled(
-        text,
-        if active {
-            theme::selected()
-        } else {
-            theme::dim()
-        },
-    )
-}
-
-fn hints(keys: &[(&str, &str)]) -> Vec<Span<'static>> {
+    // The common keys, as many as fit; ? lists them all.
+    let help = kit::key_hints(&[("?", "keys")]);
+    let help_width: usize = help.iter().map(Span::width).sum();
     let mut spans = Vec::new();
-    for (key, label) in keys {
-        spans.push(Span::styled(format!(" {key}"), theme::key_hint()));
-        spans.push(Span::styled(format!(" {label} "), theme::dim()));
+    let mut used = 0;
+    for (key, label) in keys(state.screen).iter().filter(|(k, _)| *k != "?") {
+        let hint = kit::key_hints(&[(key, label)]);
+        let width: usize = hint.iter().map(Span::width).sum();
+        if used + width + help_width > left.width as usize {
+            break;
+        }
+        used += width;
+        spans.extend(hint);
     }
-    spans
+    spans.extend(help);
+    frame.render_widget(Line::from(spans), left);
 }
 
-/// A dimmed, centered message inside `area`.
+/// A centered message inside `area`, in a muted style.
 fn placeholder(frame: &mut Frame, area: Rect, text: &str) {
     let [middle] = Layout::vertical([Constraint::Length(1)])
-        .flex(ratatui::layout::Flex::Center)
+        .flex(Flex::Center)
         .areas(area);
     frame.render_widget(
         Line::styled(text.to_owned(), theme::dim()).centered(),

@@ -1,8 +1,11 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Cell, Row, Table, TableState};
+use ratatui::widgets::{Cell, Row, TableState};
+
+use super::detail::highlight_json;
+use super::kit;
 
 use crate::fmt;
 use crate::state::{AppState, BUFFER_CAPACITY};
@@ -15,9 +18,9 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut AppState) {
     let visible = tail.visible();
 
     let status = if tail.paused {
-        Span::styled(" ⏸ PAUSED ", theme::warning())
+        Span::styled(" ❚❚ PAUSED ", theme::warning().add_modifier(Modifier::BOLD))
     } else if tail.follow {
-        Span::styled(" ● LIVE ", theme::ok())
+        Span::styled(" ● LIVE ", theme::ok().add_modifier(Modifier::BOLD))
     } else {
         Span::styled(" ◼ SCROLLED ", theme::dim())
     };
@@ -47,17 +50,15 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut AppState) {
         (area.width as usize).saturating_sub(title.chars().count() + 3),
     );
 
-    let block = Block::bordered()
-        .title(Line::styled(title, theme::title()))
-        .title(info.right_aligned());
+    let block = kit::panel(tail.topic.clone()).title(info.right_aligned());
 
     if visible.is_empty() {
         let inner = block.inner(area);
         frame.render_widget(block, area);
         let text = if tail.rows.is_empty() {
-            "Waiting for messages…"
+            "◌ Waiting for messages…"
         } else {
-            "No messages match the filter"
+            "No messages match the filter · esc clears it"
         };
         super::placeholder(frame, inner, text);
         return;
@@ -90,25 +91,43 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut AppState) {
         .map(|row| {
             let record = &row.record;
             let key = match &record.key {
-                None => Cell::from("∅").style(theme::dim()),
-                Some(_) => Cell::from(row.key_preview.as_str()),
+                None => Cell::from("∅").style(theme::faint()),
+                Some(_) => Cell::from(row.key_preview.as_str()).style(theme::info()),
             };
             let value = match &record.value {
-                None => Cell::from("∅ tombstone").style(theme::dim()),
+                None => {
+                    Cell::from("∅ tombstone").style(theme::faint().add_modifier(Modifier::ITALIC))
+                }
+                Some(_) if row.value_preview.starts_with(['{', '[']) => {
+                    Cell::from(highlight_json(&row.value_preview))
+                }
                 Some(_) => Cell::from(row.value_preview.as_str()),
             };
+            let timestamp = match record.timestamp_ms.map(fmt::timestamp) {
+                // Date in a fainter tone than the time, which changes more.
+                Some(ts) => match ts.split_once(' ') {
+                    Some((date, time)) => Line::from(vec![
+                        Span::styled(format!("{date} "), theme::faint()),
+                        Span::styled(time.to_owned(), theme::dim()),
+                    ]),
+                    None => Line::styled(ts, theme::dim()),
+                },
+                None => Line::raw(""),
+            };
             Row::new(vec![
-                Cell::from(record.partition.to_string()),
-                Cell::from(record.offset.to_string()),
-                Cell::from(record.timestamp_ms.map(fmt::timestamp).unwrap_or_default())
-                    .style(theme::dim()),
+                kit::num_styled(
+                    record.partition.to_string(),
+                    theme::partition(record.partition),
+                ),
+                kit::num(record.offset.to_string()),
+                Cell::from(timestamp),
                 key,
                 value,
             ])
         })
         .collect();
 
-    let table = Table::new(
+    let table = kit::table(
         rows,
         [
             Constraint::Length(3),
@@ -118,9 +137,13 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut AppState) {
             Constraint::Fill(1),
         ],
     )
-    .header(Row::new(["P", "Offset", "Timestamp", "Key", "Value"]).style(theme::header_row()))
-    .column_spacing(2)
-    .row_highlight_style(theme::selected())
+    .header(kit::header([
+        kit::head("P", true),
+        kit::head("OFFSET", true),
+        kit::head("TIMESTAMP", false),
+        kit::head("KEY", false),
+        kit::head("VALUE", false),
+    ]))
     .block(block);
 
     let mut table_state = TableState::default().with_selected(selected - tail.scroll);

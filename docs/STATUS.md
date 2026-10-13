@@ -9,7 +9,7 @@ Last updated: 2026-10-13. Plan and feature list: [kafka-tui-feasibility.md](kafk
 | 1. MVP: profiles, topics, live tail, seek, filters, JSON/Avro, detail, clipboard | done | v0.1.0 |
 | 2. Operations: consumer groups and lag, offset reset, replay, produce, edit & re-produce, export | done | v0.2.0 |
 | 3. Schema & admin: Schema Registry browser/diff/register, Protobuf, topic create/delete/config, DeleteRecords, tombstones | done | v0.3.0 |
-| 4. Polish: themes, keybindings, command palette, broker health, MSK IAM / Confluent Cloud auth | in progress: broker health view done | |
+| 4. Polish: themes, keybindings, command palette, broker health, MSK IAM / Confluent Cloud auth | in progress: broker health view, UI revamp with dark/light themes done | |
 
 v0.3.0 was released on 2026-10-13. The workspace version is `0.3.0`.
 
@@ -82,7 +82,7 @@ than Homebrew's and has failed on new lints before.
 ## Testing
 
 ```sh
-cargo test --workspace                                           # unit + render tests (82)
+cargo test --workspace                                           # unit + render tests (83)
 cargo test -p kaffy-kafka --test local_broker -- --ignored       # Homebrew broker on 9092 (6 tests)
 docker compose -f dev/docker-compose.yml up -d --wait
 cargo test -p kaffy-schema --test real_registry -- --ignored     # real Schema Registry (1 test)
@@ -115,11 +115,14 @@ in both the UI and the worker.
 
 ## Next task: Phase 4
 
+Done: **UI revamp** (shared look in `crates/ui/src/view/kit.rs`, palettes in `theme.rs`: dark, light
+and 16-color `terminal`, chosen by `--theme`, `$KAFFY_THEME`, config `theme`, else detected). The website
+snapshot now emits true colors as inline styles; refresh every folio panel at the next release.
 Done: **broker health view** (`4`): cluster id, reported controller, per-broker leaders/replicas/out-of-sync,
 offline and under-replicated partitions, brokers missing from metadata. On KRaft the "controller" clients
 see is a forwarding broker, not the active quorum controller; the screen says so.
 
-Remaining, from the roadmap: light/dark themes and configurable keybindings; a command palette with fuzzy
+Remaining, from the roadmap: configurable keybindings; a command palette with fuzzy
 search; MSK IAM and Confluent Cloud authentication; static binaries and Homebrew / cargo-install
 distribution. Consider macOS and arm64 builds too, since the site only offers Linux x86_64 today.
 Release as v0.4.0 when Phase 4 is done (or earlier if the user asks), adding the brokers screen to the site.

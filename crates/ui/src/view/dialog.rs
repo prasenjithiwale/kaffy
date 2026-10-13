@@ -2,9 +2,10 @@ use kaffy_kafka::{Payload, ResetTarget};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Clear, Gauge, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Clear, Gauge, Padding, Paragraph, Wrap};
 
 use super::groups::thousands;
+use super::kit;
 use crate::dialog::{Confirm, Dialog};
 use crate::fmt;
 use crate::state::AppState;
@@ -22,8 +23,9 @@ pub fn render(frame: &mut Frame, state: &AppState) {
             let mut lines = vec![Line::raw("")];
             lines.extend(options.iter().map(|(key, label)| {
                 Line::from(vec![
-                    Span::styled(format!("  {key}  "), theme::key_hint()),
-                    Span::raw(label.clone()),
+                    Span::styled(format!(" {key} "), theme::key_chip()),
+                    Span::raw("  "),
+                    Span::styled(label.clone(), theme::text()),
                 ])
             }));
             (title.clone(), lines, hint(&[("esc", "cancel")]))
@@ -32,7 +34,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
             title.clone(),
             vec![
                 Line::raw(""),
-                Line::styled("Waiting for the cluster…", theme::dim()),
+                Line::styled("◌ Waiting for the cluster…", theme::dim()),
             ],
             Line::raw(""),
         ),
@@ -449,7 +451,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         .unwrap_or(40)
         .max(title.len() + 6)
         .max(footer.width())
-        + 4)
+        + 6)
     .min(area.width.saturating_sub(4) as usize) as u16;
     lines.push(Line::raw(""));
     lines.push(footer);
@@ -462,9 +464,22 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         .areas(popup);
 
     frame.render_widget(Clear, popup);
+    let (border, icon) = match tone(dialog) {
+        Tone::Danger => (theme::error(), "✕ "),
+        Tone::Caution => (theme::warning(), "▲ "),
+        Tone::Neutral => (theme::border_focus(), ""),
+    };
     let block = Block::bordered()
-        .border_style(theme::label())
-        .title(Line::styled(format!(" {title} "), theme::title()));
+        .border_type(BorderType::Rounded)
+        .border_style(border)
+        .padding(Padding::horizontal(1))
+        .style(theme::raised())
+        .title(Line::from(vec![
+            Span::raw(" "),
+            Span::styled(icon, border),
+            Span::styled(title, theme::title()),
+            Span::raw(" "),
+        ]));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
     frame.render_widget(
@@ -501,33 +516,39 @@ fn confirm_line(confirm: &Confirm, verb: &str) -> Line<'static> {
         ]);
     }
     match &confirm.expected {
-        None => Line::from(vec![
-            Span::styled(" y ", theme::key_hint()),
-            Span::raw(verb.to_owned()),
-            Span::styled("   esc ", theme::key_hint()),
-            Span::raw("cancel"),
-        ]),
+        None => Line::from(kit::key_hints(&[("y", verb), ("esc", "cancel")])),
         Some(expected) => Line::from(vec![
-            Span::raw(format!(
-                "Production profile: type {expected} and press enter to {verb}: "
-            )),
-            Span::styled(confirm.typed.clone(), theme::warning()),
+            Span::styled("Type ", theme::dim()),
+            Span::styled(expected.clone(), theme::title()),
+            Span::styled(format!(" and press enter to {verb}  "), theme::dim()),
+            Span::styled(format!(" {} ", confirm.typed), theme::key_chip()),
             Span::styled("▏", theme::key_hint()),
         ]),
     }
 }
 
 fn hint(keys: &[(&str, &str)]) -> Line<'static> {
-    Line::from(
-        keys.iter()
-            .flat_map(|(k, l)| {
-                [
-                    Span::styled(format!(" {k} "), theme::key_hint()),
-                    Span::styled(format!("{l}  "), theme::dim()),
-                ]
-            })
-            .collect::<Vec<_>>(),
-    )
+    Line::from(kit::key_hints(keys))
+}
+
+enum Tone {
+    Neutral,
+    /// Changes that can be undone or redone.
+    Caution,
+    /// Permanent deletes.
+    Danger,
+}
+
+fn tone(dialog: &Dialog) -> Tone {
+    match dialog {
+        Dialog::DeleteTopic { .. } | Dialog::DeleteRecords { .. } => Tone::Danger,
+        Dialog::RegisterSchema { compatibility, .. } if !compatibility.compatible => Tone::Danger,
+        Dialog::ResetPlan { .. }
+        | Dialog::ReplayPlan { .. }
+        | Dialog::ConfigChange { .. }
+        | Dialog::RegisterSchema { .. } => Tone::Caution,
+        _ => Tone::Neutral,
+    }
 }
 
 fn truncate(s: &str, max: usize) -> String {

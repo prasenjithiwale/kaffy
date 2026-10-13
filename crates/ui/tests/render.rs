@@ -101,13 +101,21 @@ fn topics_screen() {
     let screen = draw(&mut state);
     assert!(screen.contains("connected · 3 brokers"));
     assert!(screen.contains("READ-ONLY"));
-    assert!(screen.contains("Topics (2)"));
-    assert!(screen.contains("▶ orders"));
+    assert!(screen.contains("Topics 2"));
+    assert!(screen.contains("▌ orders"));
+    assert!(
+        screen.contains("▲ 1 under-replicated"),
+        "payments lacks broker 2"
+    );
+    assert!(
+        screen.contains("orders · partitions"),
+        "the selected topic's partitions"
+    );
 
     state.update(Action::BeginInput(InputKind::Filter));
     state.update(Action::InputChar('p'));
     let screen = draw(&mut state);
-    assert!(screen.contains("filter: p · 1 match"));
+    assert!(screen.contains("filter p · 1 match"));
     assert!(!screen.contains("orders"));
 }
 
@@ -154,7 +162,7 @@ fn long_filter_never_hides_the_topic_name() {
     for width in [60, 80, 110, 160] {
         let screen = draw_sized(&mut state, width, 12);
         let title = screen.lines().nth(1).unwrap();
-        assert!(title.starts_with("┌ orders "), "width {width}: {title}");
+        assert!(title.starts_with("╭ orders "), "width {width}: {title}");
         assert!(
             title.contains("LIVE"),
             "width {width}: status is always shown: {title}"

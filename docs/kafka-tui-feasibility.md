@@ -155,7 +155,8 @@ Estimates are rough, for one developer working part-time.
 - [x] Read-only mode and prod-safety confirmations
 
 ### Phase 4: Polish
-- [ ] Themes (light/dark), configurable keybindings
+- [x] Themes (light/dark)
+- [ ] Configurable keybindings
 - [ ] Command palette and fuzzy search
 - [x] Broker health view
 - [ ] MSK IAM / Confluent Cloud auth

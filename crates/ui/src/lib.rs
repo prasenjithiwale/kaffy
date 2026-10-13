@@ -9,7 +9,7 @@ pub mod groups;
 pub mod schemas;
 pub mod state;
 pub mod template;
-mod theme;
+pub mod theme;
 mod view;
 
 pub use state::{Action, AppState, Effect, InputKind, Screen};

@@ -3,7 +3,9 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Cell, Paragraph, Row, Table};
+use ratatui::widgets::{Cell, Paragraph, Row};
+
+use super::kit;
 
 use super::detail::highlight_json;
 use crate::schemas::{DiffLine, diff};
@@ -14,26 +16,17 @@ pub fn render_list(frame: &mut Frame, area: Rect, state: &mut AppState) {
     let view = &state.schemas;
     let visible = view.visible();
     let total = view.list.as_ref().map_or(0, Vec::len);
-    let mut block = Block::bordered().title(Line::styled(
-        format!(" Schema Registry subjects ({total}) "),
-        theme::title(),
-    ));
+    let mut block = kit::counted("Schema Registry subjects", total);
     if !view.filter.is_empty() {
-        block = block.title(
-            Line::styled(
-                format!(" filter: {} · {} match ", view.filter, visible.len()),
-                theme::warning(),
-            )
-            .right_aligned(),
-        );
+        block = block.title(kit::filter_note(&view.filter, visible.len()));
     }
     if visible.is_empty() {
         let inner = block.inner(area);
         frame.render_widget(block, area);
         let text = match &view.list {
-            None => "Loading subjects…",
-            Some(l) if l.is_empty() => "The registry has no subjects yet (n registers one)",
-            Some(_) => "No subjects match the filter",
+            None => "◌ Loading subjects…",
+            Some(l) if l.is_empty() => "The registry has no subjects yet · n registers one",
+            Some(_) => "No subjects match the filter · esc clears it",
         };
         super::placeholder(frame, inner, text);
         return;
@@ -49,25 +42,28 @@ pub fn render_list(frame: &mut Frame, area: Rect, state: &mut AppState) {
         .map(|s| {
             Row::new(vec![
                 Cell::from(s.subject.clone()),
-                Cell::from(s.schema_type.label()).style(theme::label()),
-                Cell::from(s.version.to_string()),
-                Cell::from(s.id.to_string()).style(theme::dim()),
+                Cell::from(s.schema_type.label()).style(type_style(s.schema_type)),
+                kit::num(format!("v{}", s.version)),
+                kit::num_styled(s.id.to_string(), theme::dim()),
             ])
         })
         .collect();
-    let table = Table::new(
+    let table = kit::table(
         rows,
         [
             Constraint::Length(width),
-            Constraint::Length(12),
+            Constraint::Length(10),
             Constraint::Length(14),
             Constraint::Length(10),
         ],
     )
-    .header(Row::new(["Subject", "Type", "Latest version", "Schema id"]).style(theme::header_row()))
+    .header(kit::header([
+        kit::head("SUBJECT", false),
+        kit::head("TYPE", false),
+        kit::head("LATEST VERSION", true),
+        kit::head("SCHEMA ID", true),
+    ]))
     .column_spacing(3)
-    .row_highlight_style(theme::selected())
-    .highlight_symbol("▶ ")
     .block(block);
     frame.render_stateful_widget(table, area, &mut state.schemas.table);
 }
@@ -95,14 +91,12 @@ pub fn render_subject(frame: &mut Frame, area: Rect, state: &mut AppState) {
             ])
         })
         .collect();
-    let list = Table::new(rows, [Constraint::Length(6), Constraint::Fill(1)])
-        .row_highlight_style(theme::selected())
-        .highlight_symbol("▶ ")
-        .block(
-            Block::bordered()
-                .title(Line::styled(" Versions ", theme::title()))
-                .title_bottom(Line::styled(format!(" {compat} "), theme::dim())),
-        );
+    let list = kit::table(rows, [Constraint::Length(4), Constraint::Fill(1)]).block(
+        kit::panel("Versions").title_bottom(Line::from(vec![
+            Span::styled(" compat ", theme::faint()),
+            Span::styled(format!("{compat} "), theme::accent()),
+        ])),
+    );
     frame.render_stateful_widget(list, left, &mut view.table);
 
     let selected = view.selected_version();
@@ -110,7 +104,7 @@ pub fn render_subject(frame: &mut Frame, area: Rect, state: &mut AppState) {
     let (title, lines): (String, Vec<Line>) = match (schema, view.diff) {
         (None, _) => (
             format!(" {} ", view.subject),
-            vec![Line::styled("Loading…", theme::dim())],
+            vec![Line::styled("◌ Loading…", theme::dim())],
         ),
         (Some(s), false) => (
             format!(
@@ -144,9 +138,17 @@ pub fn render_subject(frame: &mut Frame, area: Rect, state: &mut AppState) {
     frame.render_widget(
         Paragraph::new(Text::from(lines))
             .scroll((view.scroll, 0))
-            .block(Block::bordered().title(Line::styled(title, theme::title()))),
+            .block(kit::panel(title.trim().to_owned())),
         right,
     );
+}
+
+fn type_style(schema_type: SchemaType) -> Style {
+    match schema_type {
+        SchemaType::Avro => theme::special(),
+        SchemaType::Json => theme::info(),
+        SchemaType::Protobuf => theme::warning(),
+    }
 }
 
 fn schema_lines(schema_type: SchemaType, schema: &str) -> Vec<Line<'static>> {
@@ -184,7 +186,7 @@ pub(super) fn diff_lines(diff: &[DiffLine], context: Option<usize>) -> Vec<Line<
         let style: Style = match line.sign {
             '+' => theme::ok(),
             '-' => theme::error(),
-            _ => theme::dim(),
+            _ => theme::faint(),
         };
         out.push(Line::from(vec![Span::styled(
             format!("{} {}", line.sign, line.text),

@@ -3,6 +3,11 @@
 # Profile used when --profile is not given. Without it, the first profile (alphabetically) is used.
 default_profile = "local"
 
+# Colors: "dark", "light" or "terminal" (the terminal's own 16 colors). Left out, kaffy picks
+# dark or light on terminals with true color and "terminal" elsewhere. --theme and $KAFFY_THEME
+# override it.
+# theme = "dark"
+
 [profiles.local]
 bootstrap_servers = "localhost:9092"
 # read_only defaults to true: write operations stay disabled until you opt in.

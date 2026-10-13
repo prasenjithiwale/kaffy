@@ -1,18 +1,20 @@
 use kaffy_kafka::{ClusterInfo, ProblemKind};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Cell, Paragraph, Row, Table};
+use ratatui::widgets::{Cell, Paragraph, Row, Table};
 
+use super::kit;
 use crate::state::AppState;
 use crate::theme;
 
 pub fn render(frame: &mut Frame, area: Rect, state: &mut AppState) {
     let Some(cluster) = state.brokers.cluster.as_ref() else {
-        let block = Block::bordered().title(Line::styled(" Brokers ", theme::title()));
+        let block = kit::panel("Brokers");
         let inner = block.inner(area);
         frame.render_widget(block, area);
-        super::placeholder(frame, inner, "Loading cluster…");
+        super::placeholder(frame, inner, "◌ Loading cluster…");
         return;
     };
     let health = cluster.broker_health();
@@ -31,75 +33,69 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut AppState) {
         .iter()
         .map(|b| {
             let role = if cluster.controller == Some(b.id) {
-                Cell::from("controller").style(theme::title())
+                Cell::from("◆ controller").style(theme::accent())
             } else {
                 Cell::from("")
             };
             let address = match &b.address {
-                Some(address) => Cell::from(address.clone()),
-                None => Cell::from("not in metadata, likely down").style(theme::error()),
+                Some(address) => Cell::from(Line::from(vec![
+                    Span::styled("● ", theme::ok()),
+                    Span::raw(address.clone()),
+                ])),
+                None => Cell::from("✕ not in metadata, likely down").style(theme::error()),
             };
             let out_of_sync = if b.out_of_sync > 0 {
-                Cell::from(b.out_of_sync.to_string()).style(theme::error())
+                kit::num_styled(b.out_of_sync.to_string(), theme::error())
             } else {
-                Cell::from("0").style(theme::dim())
+                kit::num_styled("0", theme::faint())
             };
             Row::new(vec![
-                Cell::from(b.id.to_string()),
+                kit::num(b.id.to_string()),
                 address,
                 role,
-                Cell::from(b.leaders.to_string()),
-                Cell::from(b.replicas.to_string()),
+                kit::num(b.leaders.to_string()),
+                kit::num(b.replicas.to_string()),
                 out_of_sync,
             ])
         })
         .collect();
     let address_width = health
         .iter()
-        .map(|b| b.address.as_ref().map_or(28, String::len))
+        .map(|b| b.address.as_ref().map_or(30, |a| a.len() + 2))
         .max()
         .unwrap_or(10)
         .max(7) as u16;
     let brokers = Table::new(
-        rows,
+        kit::striped(rows),
         [
-            Constraint::Length(4),
+            Constraint::Length(2),
             Constraint::Length(address_width),
-            Constraint::Length(10),
+            Constraint::Length(12),
             Constraint::Length(7),
             Constraint::Length(8),
             Constraint::Length(11),
         ],
     )
-    .header(
-        Row::new([
-            "ID",
-            "Address",
-            "Role",
-            "Leaders",
-            "Replicas",
-            "Out of sync",
-        ])
-        .style(theme::header_row()),
-    )
+    .header(kit::header([
+        kit::head("ID", true),
+        kit::head("ADDRESS", false),
+        kit::head("ROLE", false),
+        kit::head("LEADERS", true),
+        kit::head("REPLICAS", true),
+        kit::head("OUT OF SYNC", true),
+    ]))
     .column_spacing(3)
-    .block(Block::bordered().title(Line::styled(
-        format!(" Brokers ({}) ", cluster.brokers.len()),
-        theme::title(),
-    )));
+    .block(kit::counted("Brokers", cluster.brokers.len()));
     frame.render_widget(brokers, brokers_area);
 
-    let block = Block::bordered().title(Line::styled(
-        format!(" Partitions needing attention ({}) ", problems.len()),
-        theme::title(),
-    ));
+    let block = kit::counted("Partitions needing attention", problems.len());
     if problems.is_empty() {
         let inner = block.inner(problems_area);
         frame.render_widget(block, problems_area);
         super::placeholder(
             frame,
             inner,
-            "Every partition has a leader and all its replicas in sync",
+            "✓ Every partition has a leader and all its replicas in sync",
         );
         return;
     }
@@ -114,8 +110,8 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut AppState) {
         .iter()
         .map(|p| {
             let (problem, leader) = match p.kind {
-                ProblemKind::Offline => ("offline", "none".to_owned()),
-                ProblemKind::UnderReplicated => ("under-replicated", p.leader.to_string()),
+                ProblemKind::Offline => ("✕ offline", "none".to_owned()),
+                ProblemKind::UnderReplicated => ("▲ under-replicated", p.leader.to_string()),
             };
             let missing: Vec<i32> = p
                 .replicas
@@ -129,18 +125,18 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut AppState) {
                     ProblemKind::UnderReplicated => theme::warning(),
                 }),
                 Cell::from(p.topic.clone()),
-                Cell::from(p.partition.to_string()),
-                Cell::from(leader),
+                kit::num_styled(p.partition.to_string(), theme::partition(p.partition)),
+                kit::num(leader),
                 Cell::from(ids(&p.replicas)),
                 Cell::from(ids(&p.isr)),
                 Cell::from(ids(&missing)).style(theme::error()),
             ])
         })
         .collect();
-    let table = Table::new(
+    let table = kit::table(
         rows,
         [
-            Constraint::Length(16),
+            Constraint::Length(18),
             Constraint::Length(topic_width),
             Constraint::Length(9),
             Constraint::Length(6),
@@ -149,21 +145,16 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut AppState) {
             Constraint::Length(10),
         ],
     )
-    .header(
-        Row::new([
-            "Problem",
-            "Topic",
-            "Partition",
-            "Leader",
-            "Replicas",
-            "In sync",
-            "Missing",
-        ])
-        .style(theme::header_row()),
-    )
+    .header(kit::header([
+        kit::head("PROBLEM", false),
+        kit::head("TOPIC", false),
+        kit::head("PARTITION", true),
+        kit::head("LEADER", true),
+        kit::head("REPLICAS", false),
+        kit::head("IN SYNC", false),
+        kit::head("MISSING", false),
+    ]))
     .column_spacing(3)
-    .row_highlight_style(theme::selected())
-    .highlight_symbol("▶ ")
     .block(block);
     frame.render_stateful_widget(table, problems_area, &mut state.brokers.table);
 }
@@ -183,15 +174,23 @@ fn render_summary(frame: &mut Frame, area: Rect, cluster: &ClusterInfo, problems
         "   as reported to clients; on KRaft, the broker that forwards to the controller quorum",
         theme::dim(),
     ));
+    let offline = cluster
+        .problems()
+        .iter()
+        .any(|p| p.kind == ProblemKind::Offline);
     let health = if problems == 0 {
-        Span::styled("healthy", theme::ok())
+        Span::styled("● healthy", theme::ok())
     } else {
         Span::styled(
             format!(
-                "{problems} of {} partition(s) need attention",
+                "▲ {problems} of {} partition(s) need attention",
                 cluster.partition_count()
             ),
-            theme::error(),
+            if offline {
+                theme::error()
+            } else {
+                theme::warning().add_modifier(Modifier::BOLD)
+            },
         )
     };
     let cluster_id = cluster
@@ -203,7 +202,7 @@ fn render_summary(frame: &mut Frame, area: Rect, cluster: &ClusterInfo, problems
         field("Controller", controller),
         field("Health", vec![health]),
     ];
-    let block = Block::bordered().title(Line::styled(" Cluster ", theme::title()));
+    let block = kit::panel("Cluster");
     let inner = block.inner(area);
     frame.render_widget(block, area);
     frame.render_widget(Paragraph::new(lines), inner);
