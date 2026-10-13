@@ -23,7 +23,7 @@ const HEIGHT: u16 = 26;
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let mut worker = kaffy_kafka::spawn_demo();
-    let mut state = AppState::new("demo", true, false);
+    let mut state = AppState::new("demo", false, false);
     let mut screens = Vec::new();
 
     send(&worker, Command::ListTopics);
@@ -69,6 +69,34 @@ async fn main() {
     )
     .await;
     screens.push(("detail", draw(&mut state)));
+
+    // Consumer groups: sample lag for a few seconds so the trend lines have shape.
+    act(&mut worker, &mut state, &[Action::ShowGroups]).await;
+    for _ in 0..14 {
+        send(&worker, Command::ListGroups);
+        settle(&mut worker, &mut state, 450).await;
+    }
+    screens.push(("groups", draw(&mut state)));
+
+    act(&mut worker, &mut state, &[Action::Open]).await;
+    for _ in 0..6 {
+        send(&worker, Command::DescribeGroup("analytics-backfill".into()));
+        settle(&mut worker, &mut state, 300).await;
+    }
+    screens.push(("group", draw(&mut state)));
+
+    act(
+        &mut worker,
+        &mut state,
+        &[
+            Action::ResetOffsets,
+            Action::DialogKey('a'),
+            Action::DialogKey('e'),
+        ],
+    )
+    .await;
+    settle(&mut worker, &mut state, 300).await;
+    screens.push(("reset", draw(&mut state)));
 
     for (name, html) in screens {
         println!("<pre class=\"tui\" data-screen=\"{name}\">{html}</pre>");

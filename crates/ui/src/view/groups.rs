@@ -285,18 +285,29 @@ pub(super) fn thousands(n: i64) -> String {
     if n < 0 { format!("-{out}") } else { out }
 }
 
-/// The last `width` samples as block characters, scaled to their own maximum.
+/// The last `width` samples as block characters, scaled between the window's
+/// minimum and maximum so movement shows even when lag is large. A flat series
+/// draws low when it is zero and mid-height otherwise.
 fn inline_sparkline(
     samples: impl DoubleEndedIterator<Item = i64> + ExactSizeIterator,
     width: usize,
 ) -> String {
     const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
     let skip = samples.len().saturating_sub(width);
-    let window: Vec<i64> = samples.skip(skip).collect();
-    let max = window.iter().copied().max().unwrap_or(0).max(1);
+    let window: Vec<i64> = samples.skip(skip).map(|v| v.max(0)).collect();
+    let (min, max) = match (window.iter().min(), window.iter().max()) {
+        (Some(&min), Some(&max)) => (min, max),
+        _ => return String::new(),
+    };
     window
         .iter()
-        .map(|&v| BARS[((v.max(0) as f64 / max as f64) * 7.0).round() as usize])
+        .map(|&v| {
+            if max == min {
+                if max == 0 { BARS[0] } else { BARS[3] }
+            } else {
+                BARS[(((v - min) as f64 / (max - min) as f64) * 7.0).round() as usize]
+            }
+        })
         .collect()
 }
 
@@ -318,8 +329,14 @@ mod tests {
         assert_eq!(inline_sparkline([0, 7, 14].into_iter(), 10), "▁▅█");
         assert_eq!(inline_sparkline([0, 0].into_iter(), 10), "▁▁");
         assert_eq!(
+            inline_sparkline([1600, 1616, 1632].into_iter(), 10),
+            "▁▅█",
+            "small growth on a large lag still shows"
+        );
+        assert_eq!(inline_sparkline([40, 40].into_iter(), 10), "▄▄");
+        assert_eq!(
             inline_sparkline((0..30).collect::<Vec<i64>>().into_iter(), 4),
-            "▇███"
+            "▁▃▆█"
         );
     }
 }
