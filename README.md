@@ -65,7 +65,8 @@ you confirm. `n` registers a new subject from an Avro, JSON Schema or Protobuf s
 
 ## Keys
 
-Press `?` on any screen for its keys. `1`, `2` and `3` switch between topics, consumer groups and schemas.
+Press `?` on any screen for its keys. `1`, `2`, `3` and `4` switch between topics, consumer groups, schemas
+and brokers.
 
 | Screen | Keys |
 |---|---|
@@ -78,6 +79,7 @@ Press `?` on any screen for its keys. `1`, `2` and `3` switch between topics, co
 | subject | `↑↓` version, `d` diff with the previous version, `e` edit & register |
 | groups | `⏎` open, `R` reset offsets, `/` filter, `r` refresh |
 | group detail | `R` reset offsets, `r` refresh |
+| brokers | `↑↓` move through problem partitions, `r` refresh |
 
 ### Message filter
 
@@ -103,6 +105,16 @@ The viewer assigns partitions directly and never commits offsets, so it does not
 
 The groups tab lists every consumer group with its state, members, topics and total lag, refreshed every
 5 seconds with a trend line. Opening a group shows lag per partition, its members and a lag chart.
+
+## Broker health
+
+The brokers tab (`4`) shows the cluster id, each broker with its address and how many partitions it leads
+and replicates, and every partition that needs attention: offline (no leader) or under-replicated, with the
+replicas that have fallen out of sync. A broker that replicas point at but the metadata leaves out is listed
+as likely down. The screen refreshes every 5 seconds.
+
+The controller shown is the one brokers report to clients. On KRaft clusters that is a broker that forwards
+requests to the controller quorum, not the quorum's active controller.
 
 ## Changing things
 

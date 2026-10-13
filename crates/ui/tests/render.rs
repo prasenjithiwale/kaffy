@@ -1,7 +1,9 @@
 //! Renders each screen into an in-memory terminal and checks what is on it.
 //! Run with `--nocapture` to see the screens.
 
-use kaffy_kafka::{Command, Event, Header, PartitionInfo, Record, TopicInfo};
+use kaffy_kafka::{
+    BrokerInfo, ClusterInfo, Command, Event, Header, PartitionInfo, Record, TopicInfo,
+};
 use kaffy_ui::{Action, AppState, Effect, InputKind, Screen};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -162,4 +164,71 @@ fn long_filter_never_hides_the_topic_name() {
     // Wide enough for everything.
     let wide = draw_sized(&mut state, 200, 12);
     assert!(wide.lines().nth(1).unwrap().contains("30 received"));
+}
+
+#[test]
+fn brokers_screen_flags_missing_brokers_and_problem_partitions() {
+    let mut state = AppState::new("local", true, false);
+    assert_eq!(
+        state.update(Action::ShowBrokers),
+        Some(Effect::Kafka(Command::DescribeCluster))
+    );
+    let loading = draw(&mut state);
+    assert!(loading.contains("Loading cluster"));
+
+    let mut offline = topic("payments", vec![]);
+    offline.partitions[0].leader = -1;
+    offline.partitions[0].replicas = vec![3];
+    state.on_event(Event::Cluster(ClusterInfo {
+        cluster_id: Some("abc-123".to_owned()),
+        controller: Some(2),
+        brokers: [1, 2]
+            .map(|id| BrokerInfo {
+                id,
+                host: format!("kafka-{id}"),
+                port: 9092,
+            })
+            .to_vec(),
+        topics: vec![topic("orders", vec![1, 2]), offline],
+    }));
+    assert_eq!(state.screen, Screen::Brokers);
+    let screen = draw_sized(&mut state, 110, 24);
+    assert!(screen.contains("abc-123"));
+    assert!(screen.contains("broker 2"), "controller");
+    assert!(screen.contains("2 of 2 partition(s) need attention"));
+    assert!(screen.contains("kafka-1:9092"));
+    assert!(
+        screen.contains("not in metadata"),
+        "broker 3 is only in replica lists"
+    );
+    assert!(screen.contains("offline"));
+    assert!(screen.contains("under-replicated"));
+    assert!(screen.contains("4 Brokers"));
+}
+
+#[test]
+fn healthy_cluster_says_so() {
+    let mut state = AppState::new("local", true, false);
+    state.update(Action::ShowBrokers);
+    state.on_event(Event::Cluster(ClusterInfo {
+        cluster_id: None,
+        controller: None,
+        brokers: vec![BrokerInfo {
+            id: 1,
+            host: "localhost".to_owned(),
+            port: 9092,
+        }],
+        topics: vec![TopicInfo {
+            name: "orders".to_owned(),
+            partitions: vec![PartitionInfo {
+                id: 0,
+                leader: 1,
+                replicas: vec![1],
+                isr: vec![1],
+            }],
+        }],
+    }));
+    let screen = draw_sized(&mut state, 110, 24);
+    assert!(screen.contains("healthy"));
+    assert!(screen.contains("Every partition has a leader"));
 }

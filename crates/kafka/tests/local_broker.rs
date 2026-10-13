@@ -780,3 +780,39 @@ async fn topic_create_config_truncate_delete() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }
+
+// ---- Phase 4: broker health ----
+
+#[tokio::test]
+#[ignore = "needs a Kafka broker"]
+async fn describes_cluster_health() {
+    let topic = TestTopic::create().await;
+    let mut worker = kaffy_kafka::spawn(&Profile::adhoc(bootstrap())).unwrap();
+    worker.commands.send(Command::DescribeCluster).unwrap();
+    let cluster = expect(&mut worker, |event| match event {
+        Event::Cluster(cluster) => Some(cluster),
+        _ => None,
+    })
+    .await;
+    assert!(cluster.cluster_id.is_some(), "KRaft clusters have an id");
+    let controller = cluster.controller.expect("controller id");
+    assert!(!cluster.brokers.is_empty());
+    let health = cluster.broker_health();
+    assert!(health.iter().all(|b| b.address.is_some()), "{health:?}");
+    let ids: Vec<i32> = cluster.brokers.iter().map(|b| b.id).collect();
+    println!("controller {controller}, brokers {ids:?}");
+    assert!(
+        ids.contains(&controller),
+        "controller {controller}, brokers {ids:?}"
+    );
+    let ours = cluster
+        .topics
+        .iter()
+        .find(|t| t.name == topic.name)
+        .expect("the test topic is listed");
+    assert_eq!(ours.partitions.len(), 2);
+    assert!(
+        cluster.problems().iter().all(|p| p.topic != topic.name),
+        "a fresh topic is healthy"
+    );
+}

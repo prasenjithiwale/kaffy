@@ -1,5 +1,6 @@
 //! Terminal UI for kaffy: application state, the reducer and the ratatui views.
 
+pub mod brokers;
 pub mod dialog;
 pub mod export;
 pub mod filter;

@@ -157,7 +157,7 @@ Estimates are rough, for one developer working part-time.
 ### Phase 4: Polish
 - [ ] Themes (light/dark), configurable keybindings
 - [ ] Command palette and fuzzy search
-- [ ] Broker health view
+- [x] Broker health view
 - [ ] MSK IAM / Confluent Cloud auth
 - [ ] Static binaries, Homebrew / cargo-install / release builds
 

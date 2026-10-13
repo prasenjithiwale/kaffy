@@ -1,3 +1,4 @@
+mod brokers;
 mod config;
 mod detail;
 mod dialog;
@@ -34,6 +35,7 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
         Screen::TopicConfig => config::render(frame, body, state),
         Screen::Schemas => schemas::render_list(frame, body, state),
         Screen::SchemaDetail => schemas::render_subject(frame, body, state),
+        Screen::Brokers => brokers::render(frame, body, state),
     }
     render_footer(frame, footer, state);
     dialog::render(frame, state);
@@ -121,6 +123,13 @@ fn keys(screen: Screen) -> &'static [(&'static str, &'static str)] {
             ("?", "help"),
             ("q", "quit"),
         ],
+        Screen::Brokers => &[
+            ("↑↓", "move"),
+            ("r", "refresh"),
+            ("1", "topics"),
+            ("?", "help"),
+            ("q", "quit"),
+        ],
         Screen::GroupDetail => &[
             ("↑↓", "move"),
             ("R", "reset offsets"),
@@ -200,8 +209,15 @@ fn render_header(frame: &mut Frame, area: Rect, state: &AppState) {
             theme::ok(),
         ),
     });
-    let tabs = Line::from(vec![
-        tab(
+    if let Some(tail) = &state.tail {
+        spans.push(Span::styled("  │  ", theme::dim()));
+        spans.push(Span::styled("topic ", theme::dim()));
+        spans.push(Span::styled(tail.topic.clone(), theme::title()));
+    }
+    let left = Line::from(spans);
+
+    let tabs = [
+        (
             "1",
             "Topics",
             matches!(
@@ -209,28 +225,40 @@ fn render_header(frame: &mut Frame, area: Rect, state: &AppState) {
                 Screen::Topics | Screen::Messages | Screen::Detail | Screen::TopicConfig
             ),
         ),
-        Span::raw("  "),
-        tab(
+        (
             "2",
             "Groups",
             matches!(state.screen, Screen::Groups | Screen::GroupDetail),
         ),
-        Span::raw("  "),
-        tab(
+        (
             "3",
             "Schemas",
             matches!(state.screen, Screen::Schemas | Screen::SchemaDetail),
         ),
-        Span::raw(" "),
-    ])
-    .right_aligned();
-    frame.render_widget(tabs, area);
-    if let Some(tail) = &state.tail {
-        spans.push(Span::styled("  │  ", theme::dim()));
-        spans.push(Span::styled("topic ", theme::dim()));
-        spans.push(Span::styled(tail.topic.clone(), theme::title()));
+        ("4", "Brokers", state.screen == Screen::Brokers),
+    ];
+    let tab_line = |compact: bool| {
+        let mut spans = Vec::new();
+        for (key, label, active) in tabs {
+            if !spans.is_empty() {
+                spans.push(Span::raw("  "));
+            }
+            // Short of room, only the active tab keeps its name.
+            spans.push(tab(
+                key,
+                if compact && !active { "" } else { label },
+                active,
+            ));
+        }
+        spans.push(Span::raw(" "));
+        Line::from(spans).right_aligned()
+    };
+    let mut right = tab_line(false);
+    if left.width() + right.width() + 2 > area.width as usize {
+        right = tab_line(true);
     }
-    frame.render_widget(Line::from(spans), area);
+    frame.render_widget(right, area);
+    frame.render_widget(left, area);
 }
 
 fn render_footer(frame: &mut Frame, area: Rect, state: &AppState) {
@@ -276,11 +304,19 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &AppState) {
 }
 
 fn tab(key: &str, label: &str, active: bool) -> Span<'static> {
-    if active {
-        Span::styled(format!(" {key} {label} "), theme::selected())
+    let text = if label.is_empty() {
+        format!(" {key} ")
     } else {
-        Span::styled(format!(" {key} {label} "), theme::dim())
-    }
+        format!(" {key} {label} ")
+    };
+    Span::styled(
+        text,
+        if active {
+            theme::selected()
+        } else {
+            theme::dim()
+        },
+    )
 }
 
 fn hints(keys: &[(&str, &str)]) -> Vec<Span<'static>> {

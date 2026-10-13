@@ -6,6 +6,7 @@
 
 mod admin;
 mod client;
+mod cluster;
 mod decoders;
 mod demo;
 mod groups;
@@ -16,6 +17,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 pub use client::spawn;
+pub use cluster::{BrokerHealth, BrokerInfo, ClusterInfo, PartitionProblem, ProblemKind};
 pub use demo::spawn_demo;
 pub use kaffy_schema::{Compatibility, Decoded, SchemaType, SubjectSchema};
 
@@ -44,6 +46,8 @@ pub struct Worker {
 pub enum Command {
     /// Fetch cluster metadata; answered with [`Event::Metadata`].
     ListTopics,
+    /// Brokers, controller and partition health; answered with [`Event::Cluster`].
+    DescribeCluster,
     /// Replace any running tail with a new one. `session` is echoed back on
     /// every event so stale records from the previous tail can be ignored.
     Tail {
@@ -319,6 +323,7 @@ pub enum Event {
         brokers: usize,
         topics: Vec<TopicInfo>,
     },
+    Cluster(ClusterInfo),
     TailStarted {
         session: u64,
         partitions: usize,

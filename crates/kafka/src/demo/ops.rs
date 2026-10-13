@@ -191,14 +191,15 @@ impl Cluster {
         names
             .into_iter()
             .map(|(name, partitions)| TopicInfo {
-                // One under-replicated partition, so the column has something to show.
+                // One under-replicated partition, so the column has something to show:
+                // broker 3 has fallen behind on it (its leader, broker 2, stays in sync).
                 partitions: (0..partitions)
                     .map(|id| PartitionInfo {
                         id,
                         leader: id % 3 + 1,
                         replicas: vec![1, 2, 3],
                         isr: if name == "sensor-readings" && id == 1 {
-                            vec![1, 3]
+                            vec![1, 2]
                         } else {
                             vec![1, 2, 3]
                         },

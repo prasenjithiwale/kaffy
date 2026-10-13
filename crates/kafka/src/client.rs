@@ -8,6 +8,7 @@ use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer, StreamConsumer};
 use rdkafka::error::{KafkaError, KafkaResult};
 use rdkafka::message::{BorrowedMessage, Headers, Message, OwnedHeaders};
+use rdkafka::metadata::Metadata;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::types::RDKafkaErrorCode;
 use rdkafka::{Offset, TopicPartitionList};
@@ -19,8 +20,8 @@ use crate::decoders::Decoders;
 use crate::groups::Groups;
 use crate::replay;
 use crate::{
-    Command, EVENT_BUFFER, Error, Event, Header, Operation, PartitionInfo, Payload, ProduceRequest,
-    Record, StartAt, TopicInfo, Worker,
+    BrokerInfo, ClusterInfo, Command, EVENT_BUFFER, Error, Event, Header, Operation, PartitionInfo,
+    Payload, ProduceRequest, Record, StartAt, TopicInfo, Worker,
 };
 
 const METADATA_TIMEOUT: Duration = Duration::from_secs(10);
@@ -216,6 +217,20 @@ async fn run(ctx: Context, mut commands: mpsc::UnboundedReceiver<Command>) {
                     {
                         Ok((brokers, topics)) => Event::Metadata { brokers, topics },
                         Err(e) => Event::Error(format!("metadata: {e}")),
+                    };
+                    let _ = events.send(event).await;
+                });
+            }
+            Command::DescribeCluster => {
+                let metadata = ctx.metadata.clone();
+                let events = ctx.events.clone();
+                tokio::spawn(async move {
+                    let event = match tokio::task::spawn_blocking(move || fetch_cluster(&metadata))
+                        .await
+                        .expect("metadata task panicked")
+                    {
+                        Ok(cluster) => Event::Cluster(cluster),
+                        Err(e) => Event::Error(format!("cluster: {e}")),
                     };
                     let _ = events.send(event).await;
                 });
@@ -598,6 +613,39 @@ fn topic_partition_count(admin: &BaseConsumer, topic: &str) -> Result<usize, Str
 
 fn fetch_topics(consumer: &BaseConsumer) -> KafkaResult<(usize, Vec<TopicInfo>)> {
     let metadata = consumer.fetch_metadata(None, METADATA_TIMEOUT)?;
+    Ok((metadata.brokers().len(), topic_infos(&metadata)))
+}
+
+fn fetch_cluster(consumer: &BaseConsumer) -> KafkaResult<ClusterInfo> {
+    let metadata = consumer.fetch_metadata(None, METADATA_TIMEOUT)?;
+    let client = consumer.client();
+    // SAFETY: the pointer is valid while `consumer` is borrowed, and
+    // rd_kafka_controllerid only reads cached metadata, waiting up to the timeout.
+    let controller = unsafe {
+        rdkafka::bindings::rd_kafka_controllerid(
+            client.native_ptr(),
+            METADATA_TIMEOUT.as_millis() as i32,
+        )
+    };
+    let mut brokers: Vec<BrokerInfo> = metadata
+        .brokers()
+        .iter()
+        .map(|b| BrokerInfo {
+            id: b.id(),
+            host: b.host().to_owned(),
+            port: b.port(),
+        })
+        .collect();
+    brokers.sort_by_key(|b| b.id);
+    Ok(ClusterInfo {
+        cluster_id: client.fetch_cluster_id(METADATA_TIMEOUT),
+        controller: (controller >= 0).then_some(controller),
+        brokers,
+        topics: topic_infos(&metadata),
+    })
+}
+
+fn topic_infos(metadata: &Metadata) -> Vec<TopicInfo> {
     let mut topics: Vec<TopicInfo> = metadata
         .topics()
         .iter()
@@ -616,7 +664,7 @@ fn fetch_topics(consumer: &BaseConsumer) -> KafkaResult<(usize, Vec<TopicInfo>)>
         })
         .collect();
     topics.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok((metadata.brokers().len(), topics))
+    topics
 }
 
 async fn run_tail(

@@ -134,6 +134,10 @@ async fn main() {
     settle(&mut worker, &mut state, 300).await;
     screens.push(("config", draw(&mut state)));
 
+    act(&mut worker, &mut state, &[Action::ShowBrokers]).await;
+    settle(&mut worker, &mut state, 300).await;
+    screens.push(("brokers", draw(&mut state)));
+
     for (name, html) in screens {
         println!("<pre class=\"tui\" data-screen=\"{name}\">{html}</pre>");
     }

@@ -14,6 +14,7 @@ use kaffy_kafka::{
 use kaffy_schema::Rendered;
 use ratatui::widgets::TableState;
 
+use crate::brokers::BrokersView;
 use crate::dialog::{ChoicePurpose, Confirm, Dialog};
 use crate::export::{self, ExportFormat};
 use crate::filter::{Filter, Subject};
@@ -39,6 +40,7 @@ pub enum Screen {
     TopicConfig,
     Schemas,
     SchemaDetail,
+    Brokers,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -193,6 +195,7 @@ pub enum Action {
     /// Produce a tombstone for the selected message's key.
     Tombstone,
     ShowSchemas,
+    ShowBrokers,
     /// Show the change from the previous schema version.
     ToggleDiff,
     /// Edit the latest schema and register the result as a new version.
@@ -460,6 +463,7 @@ pub struct AppState {
     pub topic_config: Option<TopicConfigView>,
     pub schemas: SchemasView,
     pub subject: Option<SubjectView>,
+    pub brokers: BrokersView,
     pub dialog: Option<Dialog>,
     pub show_help: bool,
     wizard: Option<Wizard>,
@@ -489,6 +493,7 @@ impl AppState {
             topic_config: None,
             schemas: SchemasView::default(),
             subject: None,
+            brokers: BrokersView::default(),
             dialog: None,
             show_help: false,
             wizard: None,
@@ -530,6 +535,13 @@ impl AppState {
                 self.connection = Connection::Connected { brokers };
                 self.topics = Some(topics);
                 self.clamp_topic_selection();
+            }
+            Event::Cluster(cluster) => {
+                self.connection = Connection::Connected {
+                    brokers: cluster.brokers.len(),
+                };
+                self.brokers.cluster = Some(cluster);
+                self.brokers.clamp_selection();
             }
             Event::TailStarted {
                 session,
@@ -815,6 +827,7 @@ impl AppState {
             Action::ShowTopics => self.show_topics(),
             Action::ShowGroups => self.show_groups(),
             Action::ShowSchemas => self.show_schemas(),
+            Action::ShowBrokers => self.show_brokers(),
             Action::BeginInput(kind) => {
                 let current = match kind {
                     InputKind::Filter => self.filter().to_owned(),
@@ -868,6 +881,7 @@ impl AppState {
                 Screen::TopicConfig => self.update_topic_config(action),
                 Screen::Schemas => self.update_schemas(action),
                 Screen::SchemaDetail => self.update_subject(action),
+                Screen::Brokers => self.update_brokers(action),
             },
         }
     }
@@ -949,7 +963,8 @@ impl AppState {
             | Screen::GroupDetail
             | Screen::TopicConfig
             | Screen::Schemas
-            | Screen::SchemaDetail => {
+            | Screen::SchemaDetail
+            | Screen::Brokers => {
                 self.group_detail = None;
                 self.topic_config = None;
                 self.subject = None;
@@ -967,7 +982,8 @@ impl AppState {
             | Screen::GroupDetail
             | Screen::TopicConfig
             | Screen::Schemas
-            | Screen::SchemaDetail => None,
+            | Screen::SchemaDetail
+            | Screen::Brokers => None,
         };
         self.topic_config = None;
         self.subject = None;
@@ -979,6 +995,50 @@ impl AppState {
             Some(stop) => Effect::Many(vec![stop, list]),
             None => list,
         })
+    }
+
+    fn show_brokers(&mut self) -> Option<Effect> {
+        let leave = match self.screen {
+            Screen::Brokers => return None,
+            Screen::Messages | Screen::Detail => self.leave_tail(Screen::Brokers),
+            _ => None,
+        };
+        self.topic_config = None;
+        self.group_detail = None;
+        self.subject = None;
+        self.screen = Screen::Brokers;
+        self.brokers.requested = Some(Instant::now());
+        let describe = Effect::Kafka(Command::DescribeCluster);
+        Some(match leave {
+            Some(stop) => Effect::Many(vec![stop, describe]),
+            None => describe,
+        })
+    }
+
+    fn update_brokers(&mut self, action: Action) -> Option<Effect> {
+        let len = self
+            .brokers
+            .cluster
+            .as_ref()
+            .map_or(0, |c| c.problems().len());
+        let selected = self.brokers.table.selected().unwrap_or(0);
+        let table = &mut self.brokers.table;
+        let mut select = |i: usize| table.select(Some(i.min(len.saturating_sub(1))));
+        match action {
+            Action::Up => select(selected.saturating_sub(1)),
+            Action::Down => select(selected + 1),
+            Action::PageUp => select(selected.saturating_sub(10)),
+            Action::PageDown => select(selected + 10),
+            Action::Top => select(0),
+            Action::Bottom => select(len),
+            Action::Refresh => {
+                self.brokers.requested = Some(Instant::now());
+                return Some(Effect::Kafka(Command::DescribeCluster));
+            }
+            Action::Back => return self.show_topics(),
+            _ => {}
+        }
+        None
     }
 
     fn show_schemas(&mut self) -> Option<Effect> {
@@ -1101,6 +1161,10 @@ impl AppState {
             return None;
         }
         match self.screen {
+            Screen::Brokers if self.brokers.due() => {
+                self.brokers.requested = Some(Instant::now());
+                Some(Effect::Kafka(Command::DescribeCluster))
+            }
             Screen::Groups if self.groups.due() => {
                 self.groups.requested = Some(Instant::now());
                 Some(Effect::Kafka(Command::ListGroups))
@@ -2334,6 +2398,36 @@ mod tests {
         assert_eq!(visible_for(&mut state, r#"~"status":"PAID""#), vec![0]);
         assert_eq!(visible_for(&mut state, "not decoded"), vec![1]);
         assert_eq!(visible_for(&mut state, "404"), vec![1]);
+    }
+
+    #[test]
+    fn brokers_refresh_while_open() {
+        let mut state = writable(false);
+        assert_eq!(
+            state.update(Action::ShowBrokers),
+            Some(Effect::Kafka(Command::DescribeCluster))
+        );
+        assert_eq!(state.update(Action::Tick), None, "just refreshed");
+        state.brokers.requested = None;
+        assert_eq!(
+            state.update(Action::Tick),
+            Some(Effect::Kafka(Command::DescribeCluster))
+        );
+        assert_eq!(
+            state.update(Action::Refresh),
+            Some(Effect::Kafka(Command::DescribeCluster))
+        );
+        assert_eq!(
+            state.update(Action::Back),
+            Some(Effect::Kafka(Command::ListTopics))
+        );
+        assert_eq!(state.screen, Screen::Topics);
+        state.brokers.requested = None;
+        assert_eq!(
+            state.update(Action::Tick),
+            None,
+            "only while the screen is open"
+        );
     }
 
     fn writable(prod: bool) -> AppState {

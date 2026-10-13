@@ -13,7 +13,10 @@ use kaffy_schema::{AvroSchema, Decoded};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::{Command, EVENT_BUFFER, Event, Header, Operation, Record, StartAt, Worker};
+use crate::{
+    BrokerInfo, ClusterInfo, Command, EVENT_BUFFER, Event, Header, Operation, Record, StartAt,
+    Worker,
+};
 
 mod ops;
 
@@ -56,6 +59,23 @@ async fn run(mut commands: mpsc::UnboundedReceiver<Command>, events: mpsc::Sende
             Command::ListTopics => {
                 let topics = lock().topic_infos();
                 let _ = events.send(Event::Metadata { brokers: 3, topics }).await;
+            }
+            Command::DescribeCluster => {
+                let topics = lock().topic_infos();
+                let brokers = (1..=3)
+                    .map(|id| BrokerInfo {
+                        id,
+                        host: format!("broker-{id}.demo"),
+                        port: 9092,
+                    })
+                    .collect();
+                let cluster = ClusterInfo {
+                    cluster_id: Some("kaffy-demo-cluster".to_owned()),
+                    controller: Some(1),
+                    brokers,
+                    topics,
+                };
+                let _ = events.send(Event::Cluster(cluster)).await;
             }
             Command::Tail {
                 session,
