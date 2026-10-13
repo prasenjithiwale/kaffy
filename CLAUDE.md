@@ -5,9 +5,8 @@ usage and `docs/STATUS.md` for the full project state, environment notes and rel
 
 ## Start here
 
-**Next task: Phase 4** (v0.3.0 is released). The UI revamp (themes) and broker health view are done; see "Next task: Phase 4"
-in `docs/STATUS.md` for what remains (keybindings, command palette, MSK IAM / Confluent Cloud
-auth, distribution). Releases follow "Releasing" in the same file.
+**State:** v0.4.0 is released; Phases 1–4 of the roadmap are done. See `docs/STATUS.md` ("Next") for
+candidate follow-ups, and ask the user which to take on. Releases follow "Releasing" in the same file.
 
 ## Rules that bit before
 

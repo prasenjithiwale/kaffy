@@ -246,7 +246,8 @@ jobs:
     steps:
       - name: Wait for GitHub Pages
         run: |
-          for i in $(seq 1 60); do
+          # Pages deploys usually take a minute but have stalled for hours; see docs/STATUS.md.
+          for i in $(seq 1 120); do
             latest=$(curl -fsSL "$SITE/releases/latest.txt?nocache=$i" 2>/dev/null || true)
             if [ "$latest" = "$TAG" ]; then echo "Pages serves $TAG"; exit 0; fi
             sleep 10

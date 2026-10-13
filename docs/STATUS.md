@@ -9,9 +9,9 @@ Last updated: 2026-10-13. Plan and feature list: [kafka-tui-feasibility.md](kafk
 | 1. MVP: profiles, topics, live tail, seek, filters, JSON/Avro, detail, clipboard | done | v0.1.0 |
 | 2. Operations: consumer groups and lag, offset reset, replay, produce, edit & re-produce, export | done | v0.2.0 |
 | 3. Schema & admin: Schema Registry browser/diff/register, Protobuf, topic create/delete/config, DeleteRecords, tombstones | done | v0.3.0 |
-| 4. Polish: themes, keybindings, command palette, broker health, MSK IAM / Confluent Cloud auth | in progress: broker health view, UI revamp with dark/light themes done | |
+| 4. Polish: UI revamp and themes, keybindings, command palette, broker health, MSK IAM / Confluent Cloud auth, static Linux + macOS builds, Homebrew | done | v0.4.0 |
 
-v0.3.0 was released on 2026-10-13. The workspace version is `0.3.0`.
+v0.4.0 was released on 2026-10-13. The workspace version is `0.4.0`.
 
 ## Releasing
 
@@ -41,6 +41,10 @@ The release pipeline is automated; a version tag triggers it. Steps (as done for
    3. **homebrew:** writes `Formula/kaffy.rb` to prasenjithiwale/homebrew-tap with `HOMEBREW_TAP_DEPLOY_KEY`.
    4. **smoke-test:** waits for GitHub Pages, then runs the documented install one-liner on Ubuntu 22.04,
       Debian 12, Alpine and macOS, and `brew install prasenjithiwale/tap/kaffy` on macOS.
+   If the smoke tests time out with "Pages still serves" the old version, the folio Pages build has
+   stalled (it happened for v0.4.0: stuck "building" for two hours). Request a new build with
+   `gh api -X POST repos/prasenjithiwale/folio/pages/builds`, wait for `latest.txt` to change, then
+   `gh run rerun <run id> --repo prasenjithiwale/kaffy --failed`.
 6. **Verify:** `curl -s https://prasenjithiwale.github.io/folio/kaffy/releases/latest.txt` shows the tag,
    then `git pull` in `~/Projects/folio` to pick up the release commit.
 
@@ -55,8 +59,11 @@ than Homebrew's and has failed on new lints before.
 - **folio:** github.com/prasenjithiwale/folio, **public**, GitHub Pages from `main` /. Plain HTML/CSS,
   no build step. `kaffy/install.sh` is the installer. `kaffy/releases/` is written only by kaffy's
   release workflow: don't edit it by hand.
-- **Secret:** `FOLIO_DEPLOY_KEY` in kaffy holds the private half of a write deploy key on folio. The
-  local copy was deleted after setup.
+- **homebrew-tap:** github.com/prasenjithiwale/homebrew-tap, **public**, shared with Edge Notes (its cask).
+  `Formula/kaffy.rb` is written only by kaffy's release workflow; users run
+  `brew trust --formula prasenjithiwale/tap/kaffy` before installing (Homebrew 7 requires trust for taps).
+- **Secrets:** `FOLIO_DEPLOY_KEY` and `HOMEBREW_TAP_DEPLOY_KEY` in kaffy hold the private halves of write
+  deploy keys on folio and homebrew-tap. The local copies were deleted after setup.
 
 ## Local environment (this Mac)
 
@@ -116,26 +123,25 @@ through a worker-produced plan, then a preview dialog, then confirmation (`y`, o
 `prod = true` profiles; always typed for topic deletion and DeleteRecords). Read-only profiles are refused
 in both the UI and the worker.
 
-## Next task: Phase 4
+## Phase 4 (done, v0.4.0)
 
-Done: **UI revamp** (shared look in `crates/ui/src/view/kit.rs`, palettes in `theme.rs`: dark, light
-and 16-color `terminal`, chosen by `--theme`, `$KAFFY_THEME`, config `theme`, else detected). The website
-snapshot now emits true colors as inline styles; refresh every folio panel at the next release.
-Done: **broker health view** (`4`): cluster id, reported controller, per-broker leaders/replicas/out-of-sync,
-offline and under-replicated partitions, brokers missing from metadata. On KRaft the "controller" clients
-see is a forwarding broker, not the active quorum controller; the screen says so.
+- **UI revamp:** shared look in `crates/ui/src/view/kit.rs`; palettes in `theme.rs` (dark, light, 16-color
+  `terminal`), chosen by `--theme`, `$KAFFY_THEME`, config `theme`, else detected.
+- **Keybindings and palette:** command registry `crates/ui/src/commands.rs`, keymap `keymap.rs` (config
+  `[keys]`), palette `palette.rs` (`:` / `Ctrl-P`).
+- **Broker health:** `4`; `crates/kafka/src/cluster.rs`. On KRaft the reported controller is a forwarding broker.
+- **MSK IAM:** `aws_msk_iam` on a profile; SigV4 signer in `crates/kafka/src/msk_iam.rs`, token set with
+  `rd_kafka_oauthbearer_set_token` and renewed every 5 minutes. Not tested against a real MSK cluster.
+  Confluent Cloud works over SASL/PLAIN (documented).
+- **Distribution:** static musl Linux (built in Alpine), macOS arm64 + x86_64, Homebrew formula.
+- **Website:** folio redesigned (home: records in a log; kaffy: dark hero, screen picker). The snapshot
+  example renders true colors as inline styles.
 
-Done: **keybindings** (`[keys]` in the config; registry in `crates/ui/src/commands.rs`, keymap in
-`keymap.rs`) and the **command palette** (`:` / `Ctrl-P`, `palette.rs`).
+## Next
 
-Done: **MSK IAM** (`aws_msk_iam` on a profile; SigV4 token signer in `crates/kafka/src/msk_iam.rs`,
-set on each client with `rd_kafka_oauthbearer_set_token` and renewed every 5 minutes) and documented
-**Confluent Cloud** (SASL/PLAIN). Not tested against a real MSK cluster: the signer is checked against
-AWS's published SigV4 example, and librdkafka accepting the token is tested offline.
-
-Remaining, from the roadmap: static binaries and Homebrew / cargo-install
-distribution. Consider macOS and arm64 builds too, since the site only offers Linux x86_64 today.
-Release as v0.4.0 when Phase 4 is done (or earlier if the user asks), adding the brokers screen to the site.
+The roadmap's phases are done. Candidates: Linux arm64 builds, code signing/notarization for macOS,
+a real MSK IAM test, Kafka Connect browsing (listed out of scope in the plan, "could be a later plugin").
+Ask the user before starting one.
 
 ## Working agreements with the user
 
