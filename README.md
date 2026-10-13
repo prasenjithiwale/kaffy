@@ -26,8 +26,25 @@ Profiles are read-only unless `read_only = false`.
 |---|---|
 | everywhere | `↑↓`/`jk` move, `PgUp`/`PgDn`/`Ctrl-u`/`Ctrl-d` page, `g`/`G` top/bottom, `esc` back (clears an active filter first), `q`/`Ctrl-c` quit |
 | topics | `⏎` open, `/` filter, `r` refresh |
-| messages | `⏎` detail, `space` pause/resume, `/` filter key & value, `b` from beginning, `e` from end, `o` seek to offset, `t` seek to time (`-15m`, `2026-10-13 09:30`, RFC 3339, epoch ms), `r` reload, `y`/`Y` copy value/key |
+| messages | `⏎` detail, `space` pause/resume, `/` filter (see below), `b` from beginning, `e` from end, `o` seek to offset, `t` seek to time (`-15m`, `2026-10-13 09:30`, RFC 3339, epoch ms), `r` reload, `y`/`Y` copy value/key |
 | detail | `↑↓` scroll, `y`/`Y` copy value/key |
+
+### Message filter
+
+Press `/` on the messages screen. Terms are separated by spaces and must all match:
+
+| Term | Matches |
+|---|---|
+| `word` | key or value contains `word` (case-insensitive) |
+| `~regex` | key or value matches the regex (case-sensitive; prefix `(?i)` to ignore case) |
+| `key:x`, `value:x`, `header:x` (or `k:` `v:` `h:`) | that field contains `x`; headers are matched as `name=value` |
+| `key~re`, `value~re`, `header~re` | that field matches the regex |
+| `p:0,2` | partition 0 or 2 |
+| `after:-15m`, `before:2026-10-13T09:30` | timestamp range (relative, local time, RFC 3339 or epoch ms) |
+| `!term` | negates a term |
+
+Wrap a whole term in quotes to include spaces: `"key:a b"`. Quotes elsewhere are literal,
+so `~"status":"(PAID|SHIPPED)"` works as typed.
 
 Opening a topic reads the last 100 messages of each partition, then follows new ones. Up to 5,000 messages are kept in memory.
 The viewer assigns partitions directly and never commits offsets, so it does not join or disturb any consumer group.

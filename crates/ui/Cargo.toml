@@ -10,3 +10,4 @@ kaffy-kafka.workspace = true
 kaffy-schema.workspace = true
 chrono.workspace = true
 ratatui.workspace = true
+regex.workspace = true

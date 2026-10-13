@@ -22,6 +22,7 @@ crossterm = { version = "0.29", features = ["event-stream"] }
 dirs = "7"
 futures = "0.3"
 ratatui = "0.30"
+regex = "1"
 rdkafka = { version = "0.39", features = ["cmake-build", "ssl-vendored", "tokio"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }

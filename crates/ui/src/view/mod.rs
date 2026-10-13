@@ -8,7 +8,7 @@ use ratatui::style::Color;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use crate::state::{AppState, Connection, Screen};
+use crate::state::{AppState, Connection, InputKind, Screen};
 use crate::theme;
 
 pub fn render(frame: &mut Frame, state: &mut AppState) {
@@ -66,18 +66,27 @@ fn render_header(frame: &mut Frame, area: Rect, state: &AppState) {
 
 fn render_footer(frame: &mut Frame, area: Rect, state: &AppState) {
     if let Some(input) = &state.input {
-        let [left, right] =
-            Layout::horizontal([Constraint::Min(0), Constraint::Length(22)]).areas(area);
+        let filtering_messages = input.kind == InputKind::Filter && state.screen != Screen::Topics;
+        let right_text: Line = match state.tail.as_ref().and_then(|t| t.filter_error()) {
+            Some(error) if filtering_messages => Line::styled(format!("{error} "), theme::error()),
+            _ if filtering_messages && input.buffer.is_empty() => Line::styled(
+                "word  ~regex  key:  value:  h:  p:0,2  after:-15m  before:  !not ",
+                theme::dim(),
+            ),
+            _ => Line::from(hints(&[("⏎", "apply"), ("esc", "cancel")])),
+        };
+        let [left, right] = Layout::horizontal([
+            Constraint::Min(0),
+            Constraint::Length(right_text.width() as u16),
+        ])
+        .areas(area);
         let line = Line::from(vec![
             Span::styled(input.kind.prompt(), theme::key_hint()),
             Span::raw(input.buffer.clone()),
             Span::styled("▏", theme::key_hint()),
         ]);
         frame.render_widget(line, left);
-        frame.render_widget(
-            Line::from(hints(&[("⏎", "apply"), ("esc", "cancel")])).right_aligned(),
-            right,
-        );
+        frame.render_widget(right_text.right_aligned(), right);
         return;
     }
     if let Some(flash) = &state.flash {

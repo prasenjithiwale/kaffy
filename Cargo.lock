@@ -986,6 +986,7 @@ dependencies = [
  "kaffy-kafka",
  "kaffy-schema",
  "ratatui",
+ "regex",
 ]
 
 [[package]]

@@ -34,7 +34,9 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut AppState) {
         ),
         theme::dim(),
     )];
-    if !tail.filter.is_empty() {
+    if let Some(error) = tail.filter_error() {
+        info.push(Span::styled(format!(" filter: {error} "), theme::error()));
+    } else if !tail.filter.is_empty() {
         info.push(Span::styled(
             format!(" filter: {} · {} match ", tail.filter, visible.len()),
             theme::warning(),

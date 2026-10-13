@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use kaffy_kafka::{Command, Event, Record, StartAt, TopicInfo};
 use ratatui::widgets::TableState;
 
+use crate::filter::{Filter, Subject};
 use crate::fmt;
 
 /// Records kept per tail; older ones are dropped.
@@ -101,8 +102,11 @@ pub struct Row {
     pub record: Record,
     pub key_preview: String,
     pub value_preview: String,
-    /// Lower-cased key + value text, for the filter.
-    haystack: String,
+    /// Text the filter searches; binary payloads are converted lossily.
+    key_text: String,
+    value_text: String,
+    /// One `name=value` line per header.
+    headers_text: String,
 }
 
 impl Row {
@@ -117,18 +121,34 @@ impl Row {
             .as_deref()
             .map(|v| kaffy_schema::preview(v, PREVIEW_CHARS))
             .unwrap_or_default();
-        fn lossy(bytes: &Option<Vec<u8>>) -> std::borrow::Cow<'_, str> {
+        let lossy = |bytes: Option<&[u8]>| {
             bytes
-                .as_deref()
-                .map(String::from_utf8_lossy)
+                .map(|b| String::from_utf8_lossy(b).into_owned())
                 .unwrap_or_default()
-        }
-        let haystack = format!("{}\n{}", lossy(&record.key), lossy(&record.value)).to_lowercase();
+        };
+        let headers_text = record
+            .headers
+            .iter()
+            .map(|h| format!("{}={}", h.key, lossy(h.value.as_deref())))
+            .collect::<Vec<_>>()
+            .join("\n");
         Self {
+            key_text: lossy(record.key.as_deref()),
+            value_text: lossy(record.value.as_deref()),
+            headers_text,
             record,
             key_preview,
             value_preview,
-            haystack,
+        }
+    }
+
+    fn subject(&self) -> Subject<'_> {
+        Subject {
+            key: &self.key_text,
+            value: &self.value_text,
+            headers: &self.headers_text,
+            partition: self.record.partition,
+            timestamp_ms: self.record.timestamp_ms,
         }
     }
 
@@ -146,7 +166,9 @@ pub struct TailView {
     pub rows: VecDeque<Row>,
     pub received: u64,
     pub paused: bool,
+    /// The filter as typed; see [`crate::filter`] for the syntax.
     pub filter: String,
+    compiled: Result<Filter, String>,
     /// Keep the newest record selected as records arrive.
     pub follow: bool,
     /// (partition, offset) of the selected record when not following.
@@ -166,24 +188,34 @@ impl TailView {
             received: 0,
             paused: false,
             filter: String::new(),
+            compiled: Ok(Filter::default()),
             follow: true,
             selected: None,
             scroll: 0,
         }
     }
 
-    /// Indices into `rows` that match the filter.
+    /// Indices into `rows` that match the filter. An invalid filter shows everything.
     pub fn visible(&self) -> Vec<usize> {
-        if self.filter.is_empty() {
-            return (0..self.rows.len()).collect();
+        match &self.compiled {
+            Ok(filter) if !filter.is_empty() => self
+                .rows
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| filter.matches(&row.subject()))
+                .map(|(i, _)| i)
+                .collect(),
+            _ => (0..self.rows.len()).collect(),
         }
-        let needle = self.filter.to_lowercase();
-        self.rows
-            .iter()
-            .enumerate()
-            .filter(|(_, row)| row.haystack.contains(&needle))
-            .map(|(i, _)| i)
-            .collect()
+    }
+
+    pub fn filter_error(&self) -> Option<&str> {
+        self.compiled.as_ref().err().map(String::as_str)
+    }
+
+    fn set_filter(&mut self, text: String) {
+        self.compiled = Filter::parse(&text, fmt::now_ms());
+        self.filter = text;
     }
 
     /// Position of the selected row within `visible`.
@@ -445,7 +477,7 @@ impl AppState {
                 self.detail = Some(DetailView::new(record));
                 self.screen = Screen::Detail;
             }
-            Action::Back if !tail.filter.is_empty() => tail.filter.clear(),
+            Action::Back if !tail.filter.is_empty() => tail.set_filter(String::new()),
             Action::Back => {
                 self.tail = None;
                 self.screen = Screen::Topics;
@@ -537,7 +569,7 @@ impl AppState {
         let filter = self.tail.take().map(|t| t.filter).unwrap_or_default();
         let effect = self.start_tail(topic, start);
         if let Some(tail) = self.tail.as_mut() {
-            tail.filter = filter;
+            tail.set_filter(filter);
         }
         self.flash_info(format!("reading from {}", fmt::start_at(start)));
         effect
@@ -553,7 +585,7 @@ impl AppState {
 
     fn set_filter(&mut self, value: String) {
         match (self.screen, self.tail.as_mut()) {
-            (Screen::Messages | Screen::Detail, Some(tail)) => tail.filter = value,
+            (Screen::Messages | Screen::Detail, Some(tail)) => tail.set_filter(value),
             _ => {
                 self.topic_filter = value;
                 self.clamp_topic_selection();
