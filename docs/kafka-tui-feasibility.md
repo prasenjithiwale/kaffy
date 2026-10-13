@@ -159,7 +159,7 @@ Estimates are rough, for one developer working part-time.
 - [x] Configurable keybindings
 - [x] Command palette and fuzzy search
 - [x] Broker health view
-- [ ] MSK IAM / Confluent Cloud auth
+- [x] MSK IAM / Confluent Cloud auth
 - [ ] Static binaries, Homebrew / cargo-install / release builds
 
 ---

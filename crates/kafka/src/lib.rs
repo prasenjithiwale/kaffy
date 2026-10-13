@@ -10,6 +10,7 @@ mod cluster;
 mod decoders;
 mod demo;
 mod groups;
+mod msk_iam;
 mod replay;
 
 use std::sync::Arc;
@@ -35,6 +36,8 @@ pub enum Error {
     SchemaRegistry(String),
     #[error("{0}")]
     Protobuf(String),
+    #[error("{0}")]
+    Auth(String),
 }
 
 pub struct Worker {

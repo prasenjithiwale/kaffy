@@ -82,7 +82,7 @@ than Homebrew's and has failed on new lints before.
 ## Testing
 
 ```sh
-cargo test --workspace                                           # unit + render tests (94)
+cargo test --workspace                                           # unit + render tests (100)
 cargo test -p kaffy-kafka --test local_broker -- --ignored       # Homebrew broker on 9092 (6 tests)
 docker compose -f dev/docker-compose.yml up -d --wait
 cargo test -p kaffy-schema --test real_registry -- --ignored     # real Schema Registry (1 test)
@@ -125,7 +125,12 @@ see is a forwarding broker, not the active quorum controller; the screen says so
 Done: **keybindings** (`[keys]` in the config; registry in `crates/ui/src/commands.rs`, keymap in
 `keymap.rs`) and the **command palette** (`:` / `Ctrl-P`, `palette.rs`).
 
-Remaining, from the roadmap: MSK IAM and Confluent Cloud authentication; static binaries and Homebrew / cargo-install
+Done: **MSK IAM** (`aws_msk_iam` on a profile; SigV4 token signer in `crates/kafka/src/msk_iam.rs`,
+set on each client with `rd_kafka_oauthbearer_set_token` and renewed every 5 minutes) and documented
+**Confluent Cloud** (SASL/PLAIN). Not tested against a real MSK cluster: the signer is checked against
+AWS's published SigV4 example, and librdkafka accepting the token is tested offline.
+
+Remaining, from the roadmap: static binaries and Homebrew / cargo-install
 distribution. Consider macOS and arm64 builds too, since the site only offers Linux x86_64 today.
 Release as v0.4.0 when Phase 4 is done (or earlier if the user asks), adding the brokers screen to the site.
 

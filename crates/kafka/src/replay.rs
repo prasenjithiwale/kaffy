@@ -4,6 +4,7 @@
 //! the produce time, so retention doesn't delete them straight away.
 
 use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -19,6 +20,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::client::to_record;
 use crate::decoders::Decoders;
 use crate::groups::{EARLIEST, LATEST, query_offsets};
+use crate::msk_iam::Auth;
 use crate::{Event, PartitionRange, RecordFilter, ReplayEnd, ReplayPlan, ReplayProgress, StartAt};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -121,6 +123,7 @@ pub(crate) struct Job {
     /// Consumer settings for reading the source.
     pub config: ClientConfig,
     pub producer: FutureProducer,
+    pub auth: Auth,
     pub decoders: Decoders,
     pub id: u64,
     pub plan: ReplayPlan,
@@ -150,6 +153,7 @@ async fn copy(
     let Job {
         mut config,
         producer,
+        auth,
         decoders,
         plan,
         filter,
@@ -159,7 +163,8 @@ async fn copy(
     // EOF events tell us a partition has nothing more right now, which also ends
     // ranges whose last offsets were removed by compaction.
     config.set("enable.partition.eof", "true");
-    let consumer: StreamConsumer = config.create().map_err(|e| e.to_string())?;
+    let consumer: Arc<StreamConsumer> = Arc::new(config.create().map_err(|e| e.to_string())?);
+    auth.attach(&consumer)?;
     let mut tpl = TopicPartitionList::new();
     let mut remaining: HashMap<i32, i64> = HashMap::new();
     for range in plan.ranges.iter().filter(|r| r.to > r.from) {

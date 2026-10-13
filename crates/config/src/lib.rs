@@ -88,6 +88,8 @@ pub struct Profile {
     #[serde(default)]
     pub security_protocol: SecurityProtocol,
     pub sasl: Option<Sasl>,
+    /// Amazon MSK IAM authentication, instead of `[sasl]`.
+    pub aws_msk_iam: Option<AwsMskIam>,
     pub tls: Option<Tls>,
     /// Blocks every write operation (produce, offset reset, delete, ...).
     #[serde(default = "default_true")]
@@ -103,6 +105,17 @@ pub struct Profile {
     /// `.proto` files to decode them with.
     #[serde(default)]
     pub protobuf: Vec<ProtobufTopic>,
+}
+
+/// Amazon MSK IAM: SASL/OAUTHBEARER with tokens signed by AWS credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AwsMskIam {
+    /// The cluster's AWS region, e.g. `eu-west-1`.
+    pub region: String,
+    /// A profile from `~/.aws/config`; otherwise the environment's credentials
+    /// or the `default` profile.
+    pub profile: Option<String>,
 }
 
 /// How to decode one topic's Protobuf messages from local `.proto` files.
@@ -271,6 +284,7 @@ impl Profile {
             bootstrap_servers: bootstrap_servers.into(),
             security_protocol: SecurityProtocol::Plaintext,
             sasl: None,
+            aws_msk_iam: None,
             tls: None,
             read_only: true,
             prod: false,
@@ -288,12 +302,30 @@ impl Profile {
         if self.bootstrap_servers.trim().is_empty() {
             return Err(invalid("bootstrap_servers is empty"));
         }
-        match (self.security_protocol.uses_sasl(), self.sasl.is_some()) {
-            (true, false) => return Err(invalid("security_protocol needs a [sasl] section")),
-            (false, true) => {
-                return Err(invalid("[sasl] is set but security_protocol is not sasl_*"));
+        if let Some(iam) = &self.aws_msk_iam {
+            if self.sasl.is_some() {
+                return Err(invalid("use either [sasl] or aws_msk_iam, not both"));
             }
-            _ => {}
+            if self.security_protocol != SecurityProtocol::SaslSsl {
+                return Err(invalid(
+                    "aws_msk_iam needs security_protocol = \"sasl_ssl\" (MSK's IAM listener, port 9098)",
+                ));
+            }
+            if iam.region.trim().is_empty() {
+                return Err(invalid("aws_msk_iam needs a region"));
+            }
+        } else {
+            match (self.security_protocol.uses_sasl(), self.sasl.is_some()) {
+                (true, false) => {
+                    return Err(invalid(
+                        "security_protocol needs a [sasl] section (or aws_msk_iam)",
+                    ));
+                }
+                (false, true) => {
+                    return Err(invalid("[sasl] is set but security_protocol is not sasl_*"));
+                }
+                _ => {}
+            }
         }
         for mapping in &self.protobuf {
             if mapping.files.is_empty() || (mapping.value.is_none() && mapping.key.is_none()) {
@@ -333,6 +365,10 @@ impl Profile {
         ];
         let mut push = |key: &str, value: String| props.push((key.to_owned(), value));
 
+        if self.aws_msk_iam.is_some() {
+            // kaffy signs the tokens and hands them to each client.
+            push("sasl.mechanism", "OAUTHBEARER".to_owned());
+        }
         if let Some(sasl) = &self.sasl {
             push("sasl.mechanism", sasl.mechanism.as_librdkafka().to_owned());
             push("sasl.username", sasl.username.clone());
@@ -457,6 +493,43 @@ schema_registry = { url = "https://sr:8081/", username = "key", password_env = "
     }
 
     #[test]
+    fn msk_iam_uses_oauthbearer() {
+        let config = Config::from_toml_str(
+            r#"
+[profiles.msk]
+bootstrap_servers = "b-1.msk.eu-west-1.amazonaws.com:9098"
+security_protocol = "sasl_ssl"
+aws_msk_iam = { region = "eu-west-1", profile = "dev" }
+
+[profiles.both]
+bootstrap_servers = "b:9098"
+security_protocol = "sasl_ssl"
+aws_msk_iam = { region = "eu-west-1" }
+sasl = { mechanism = "PLAIN", username = "u", password_env = "X" }
+
+[profiles.plaintext]
+bootstrap_servers = "b:9098"
+aws_msk_iam = { region = "eu-west-1" }
+"#,
+        )
+        .unwrap();
+        let msk = config.profile(Some("msk")).unwrap();
+        let props = msk.librdkafka_properties().unwrap();
+        assert_eq!(get(&props, "sasl.mechanism"), Some("OAUTHBEARER"));
+        assert_eq!(get(&props, "security.protocol"), Some("sasl_ssl"));
+        assert_eq!(
+            msk.aws_msk_iam.as_ref().unwrap().profile.as_deref(),
+            Some("dev")
+        );
+        for name in ["both", "plaintext"] {
+            assert!(
+                config.profile(Some(name)).unwrap().validate().is_err(),
+                "{name} is inconsistent"
+            );
+        }
+    }
+
+    #[test]
     fn rejects_inconsistent_security() {
         let config = Config::from_toml_str(
             r#"
@@ -475,7 +548,7 @@ security_protocol = "sasl_plaintext"
     #[test]
     fn example_config_is_valid() {
         let config = Config::from_toml_str(include_str!("../../../config.example.toml")).unwrap();
-        assert_eq!(config.profiles.len(), 3);
+        assert_eq!(config.profiles.len(), 5);
         for profile in config.profiles.values() {
             profile.validate().unwrap();
         }

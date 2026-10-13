@@ -31,6 +31,36 @@ Copy [config.example.toml](config.example.toml) to `~/.config/kaffy/config.toml`
 Passwords are never stored in the file: `sasl.password_env` names an environment variable to read them from.
 Profiles are read-only unless `read_only = false`.
 
+### Cloud clusters
+
+**Confluent Cloud** uses an API key and secret over SASL/PLAIN, and the Schema Registry takes its own key:
+
+```toml
+[profiles.confluent]
+bootstrap_servers = "pkc-xxxxx.eu-west-1.aws.confluent.cloud:9092"
+security_protocol = "sasl_ssl"
+sasl = { mechanism = "PLAIN", username = "<cluster API key>", password_env = "KAFFY_CC_SECRET" }
+schema_registry = { url = "https://psrc-xxxxx.eu-west-1.aws.confluent.cloud", username = "<registry API key>", password_env = "KAFFY_CC_SR_SECRET" }
+```
+
+**Amazon MSK with IAM** connects to the cluster's IAM listener (port 9098):
+
+```toml
+[profiles.msk]
+bootstrap_servers = "b-1.mycluster.abc123.c2.kafka.eu-west-1.amazonaws.com:9098"
+security_protocol = "sasl_ssl"
+aws_msk_iam = { region = "eu-west-1", profile = "msk-dev" }   # profile is optional
+```
+
+kaffy signs the IAM tokens itself (SigV4, as AWS's signer libraries do) and renews them every 5 minutes.
+Credentials come from the named AWS profile through the AWS CLI (`aws configure export-credentials`, so SSO
+and assumed roles work; run `aws sso login` first), falling back to `~/.aws/credentials`. Without a
+profile it uses the `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` variables, then
+`$AWS_PROFILE` or `default`. The IAM policy needs `kafka-cluster:Connect` plus the read actions
+(`DescribeTopic`, `ReadData`, `DescribeGroup`, …) and, for writes, the matching write actions.
+
+TLS uses the system's CA certificates, so neither needs `[tls]`.
+
 ### Schema Registry
 
 Payloads in the Confluent wire format (magic byte + schema id) are decoded through a Confluent-compatible

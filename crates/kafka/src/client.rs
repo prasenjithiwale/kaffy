@@ -18,6 +18,7 @@ use tokio::task::JoinHandle;
 use crate::admin::{self, Admin};
 use crate::decoders::Decoders;
 use crate::groups::Groups;
+use crate::msk_iam::Auth;
 use crate::replay;
 use crate::{
     BrokerInfo, ClusterInfo, Command, EVENT_BUFFER, Error, Event, Header, Operation, PartitionInfo,
@@ -36,7 +37,9 @@ pub fn spawn(profile: &Profile) -> Result<Worker, Error> {
     for (key, value) in profile.librdkafka_properties()? {
         base.set(key, value);
     }
+    let auth = Auth::for_profile(profile);
     let metadata: Arc<BaseConsumer> = Arc::new(viewer_config(&base).create()?);
+    auth.attach(&metadata).map_err(Error::Auth)?;
     let registry = match profile.resolved_schema_registry()? {
         Some(sr) => Some(Arc::new(
             Registry::new(&sr.url, sr.basic_auth).map_err(Error::SchemaRegistry)?,
@@ -48,7 +51,8 @@ pub fn spawn(profile: &Profile) -> Result<Worker, Error> {
     let (command_tx, command_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::channel(EVENT_BUFFER);
     let ctx = Context {
-        groups: Arc::new(Groups::new(base.clone(), metadata.clone())),
+        groups: Arc::new(Groups::new(base.clone(), metadata.clone(), auth.clone())),
+        auth,
         base,
         metadata,
         registry,
@@ -102,10 +106,11 @@ struct Context {
     groups: Arc<Groups>,
     registry: Option<Arc<Registry>>,
     decoders: Decoders,
+    auth: Auth,
     /// Created on the first write, so read-only sessions never open one.
-    producer: Arc<OnceLock<FutureProducer>>,
+    producer: Arc<OnceLock<Arc<FutureProducer>>>,
     /// Created on first use, like the producer.
-    admin: Arc<OnceLock<Admin>>,
+    admin: Arc<OnceLock<Arc<Admin>>>,
     read_only: bool,
     events: mpsc::Sender<Event>,
 }
@@ -113,22 +118,29 @@ struct Context {
 impl Context {
     fn producer(&self) -> Result<FutureProducer, String> {
         if let Some(producer) = self.producer.get() {
-            return Ok(producer.clone());
+            return Ok(FutureProducer::clone(producer));
         }
-        let producer: FutureProducer = producer_config(&self.base)
-            .create()
-            .map_err(|e| format!("creating producer: {e}"))?;
-        Ok(self.producer.get_or_init(|| producer).clone())
+        let producer: Arc<FutureProducer> = Arc::new(
+            producer_config(&self.base)
+                .create()
+                .map_err(|e| format!("creating producer: {e}"))?,
+        );
+        self.auth.attach(&producer)?;
+        Ok(FutureProducer::clone(
+            self.producer.get_or_init(|| producer),
+        ))
     }
 
     fn admin(&self) -> Result<&Admin, String> {
         if let Some(admin) = self.admin.get() {
             return Ok(admin);
         }
-        let admin: Admin = self
-            .base
-            .create()
-            .map_err(|e| format!("creating admin client: {e}"))?;
+        let admin: Arc<Admin> = Arc::new(
+            self.base
+                .create()
+                .map_err(|e| format!("creating admin client: {e}"))?,
+        );
+        self.auth.attach(&admin)?;
         Ok(self.admin.get_or_init(|| admin))
     }
 
@@ -246,6 +258,7 @@ async fn run(ctx: Context, mut commands: mpsc::UnboundedReceiver<Command>) {
                 let (control, control_rx) = mpsc::unbounded_channel();
                 let task = tokio::spawn(run_tail(
                     viewer_config(&ctx.base),
+                    ctx.auth.clone(),
                     ctx.decoders.clone(),
                     session,
                     topic,
@@ -374,6 +387,7 @@ async fn run(ctx: Context, mut commands: mpsc::UnboundedReceiver<Command>) {
                 let job = replay::Job {
                     config: viewer_config(&ctx.base),
                     producer,
+                    auth: ctx.auth.clone(),
                     decoders: ctx.decoders.clone(),
                     id,
                     plan,
@@ -667,8 +681,10 @@ fn topic_infos(metadata: &Metadata) -> Vec<TopicInfo> {
     topics
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_tail(
     config: ClientConfig,
+    auth: Auth,
     decoders: Decoders,
     session: u64,
     topic: String,
@@ -676,15 +692,21 @@ async fn run_tail(
     control: mpsc::UnboundedReceiver<Command>,
     events: mpsc::Sender<Event>,
 ) {
-    if let Err(e) = tail(config, decoders, session, &topic, start, control, &events).await {
+    if let Err(e) = tail(
+        config, auth, decoders, session, &topic, start, control, &events,
+    )
+    .await
+    {
         let _ = events
             .send(Event::Error(format!("tail {topic}: {e}")))
             .await;
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn tail(
     config: ClientConfig,
+    auth: Auth,
     decoders: Decoders,
     session: u64,
     topic: &str,
@@ -693,6 +715,7 @@ async fn tail(
     events: &mpsc::Sender<Event>,
 ) -> KafkaResult<()> {
     let consumer: Arc<StreamConsumer> = Arc::new(config.create()?);
+    auth.attach(&consumer).map_err(KafkaError::ClientCreation)?;
     let partitions = {
         let consumer = consumer.clone();
         let topic = topic.to_owned();

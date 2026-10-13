@@ -10,6 +10,7 @@ use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer};
 use rdkafka::error::{KafkaError, KafkaResult};
 use rdkafka::{Offset, TopicPartitionList};
 
+use crate::msk_iam::Auth;
 use crate::{
     GroupDetail, GroupMember, GroupState, GroupSummary, PartitionLag, PartitionOffset, ResetPlan,
     ResetRow, ResetTarget,
@@ -28,14 +29,16 @@ pub(crate) struct Groups {
     /// One client per group, configured with that group.id to read and commit
     /// its offsets. They never subscribe, so they never join the group.
     clients: Mutex<HashMap<String, Arc<BaseConsumer>>>,
+    auth: Auth,
 }
 
 impl Groups {
-    pub(crate) fn new(base: ClientConfig, admin: Arc<BaseConsumer>) -> Self {
+    pub(crate) fn new(base: ClientConfig, admin: Arc<BaseConsumer>, auth: Auth) -> Self {
         Self {
             base,
             admin,
             clients: Mutex::new(HashMap::new()),
+            auth,
         }
     }
 
@@ -255,6 +258,9 @@ impl Groups {
                 .set("enable.auto.offset.store", "false")
                 .create()?,
         );
+        self.auth
+            .attach(&client)
+            .map_err(KafkaError::ClientCreation)?;
         clients.insert(group.to_owned(), client.clone());
         Ok(client)
     }

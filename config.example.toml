@@ -31,6 +31,20 @@ security_protocol = "ssl"
 prod = true                              # shows a PROD badge; destructive ops will need typed confirmation
 tls = { ca_location = "/etc/kaffy/ca.pem", certificate_location = "/etc/kaffy/client.pem", key_location = "/etc/kaffy/client.key" }
 
+# Confluent Cloud: an API key and secret over SASL/PLAIN; the registry has its own key.
+[profiles.confluent]
+bootstrap_servers = "pkc-xxxxx.eu-west-1.aws.confluent.cloud:9092"
+security_protocol = "sasl_ssl"
+sasl = { mechanism = "PLAIN", username = "<cluster API key>", password_env = "KAFFY_CC_SECRET" }
+schema_registry = { url = "https://psrc-xxxxx.eu-west-1.aws.confluent.cloud", username = "<registry API key>", password_env = "KAFFY_CC_SR_SECRET" }
+
+# Amazon MSK with IAM access control (the IAM listener, port 9098). Credentials come from the
+# AWS profile (SSO and assumed roles work through the AWS CLI) or the AWS_* environment variables.
+[profiles.msk]
+bootstrap_servers = "b-1.mycluster.abc123.c2.kafka.eu-west-1.amazonaws.com:9098"
+security_protocol = "sasl_ssl"
+aws_msk_iam = { region = "eu-west-1", profile = "msk-dev" }
+
 # Any librdkafka property can be set directly and overrides the settings above.
 [profiles.prod-mtls.librdkafka]
 "socket.timeout.ms" = "10000"

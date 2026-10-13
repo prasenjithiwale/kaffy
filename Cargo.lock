@@ -1419,6 +1419,9 @@ name = "kaffy-kafka"
 version = "0.3.0"
 dependencies = [
  "apache-avro",
+ "base64 0.22.1",
+ "chrono",
+ "dirs",
  "futures",
  "kaffy-config",
  "kaffy-schema",
@@ -1426,6 +1429,7 @@ dependencies = [
  "rdkafka",
  "reqwest",
  "serde_json",
+ "sha2",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
