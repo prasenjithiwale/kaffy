@@ -1,9 +1,13 @@
-# Builds a Linux release when a v* tag is pushed and publishes it to the public
-# folio site (github.com/prasenjithiwale/folio), which serves the install script:
+# Builds kaffy for Linux and macOS when a v* tag is pushed, publishes the archives
+# to the public folio site (github.com/prasenjithiwale/folio), which serves the
+# install script, and updates the Homebrew formula in prasenjithiwale/homebrew-tap:
 #
 #   curl -fsSL https://prasenjithiwale.github.io/folio/kaffy/install.sh | sh
+#   brew trust --formula prasenjithiwale/tap/kaffy && brew install prasenjithiwale/tap/kaffy
 #
-# Needs the FOLIO_DEPLOY_KEY secret: the private half of a write deploy key on folio.
+# Needs two secrets, each the private half of a write deploy key:
+#   FOLIO_DEPLOY_KEY         on prasenjithiwale/folio
+#   HOMEBREW_TAP_DEPLOY_KEY  on prasenjithiwale/homebrew-tap
 
 name: Release
 
@@ -13,8 +17,12 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing tag to (re)build, e.g. v0.1.0"
+        description: "Existing tag to (re)build, e.g. v0.4.0 (any ref for a dry run)"
         required: true
+      dry_run:
+        description: "Only build and check the binaries; publish nothing"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -22,26 +30,18 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   TAG: ${{ inputs.tag || github.ref_name }}
-  TARGET: x86_64-unknown-linux-gnu
   SITE: https://prasenjithiwale.github.io/folio/kaffy
 
 jobs:
-  build:
-    # Building on the oldest runner keeps the glibc requirement at 2.35.
-    runs-on: ubuntu-22.04
-    timeout-minutes: 40
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.TAG }}
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Install build dependencies
-        # librdkafka includes <curl/curl.h> even when built without curl (an
-        # #ifdef on a macro that is always defined). Headers only: nothing links it.
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libcurl4-openssl-dev
-
       - name: Check the tag matches the crate version
+        if: ${{ !inputs.dry_run }}
         run: |
           version=$(cargo metadata --no-deps --format-version 1 \
             | jq -r '.packages[] | select(.name == "kaffy") | .version')
@@ -49,48 +49,101 @@ jobs:
             echo "::error::Tag $TAG does not match Cargo version v$version"; exit 1
           fi
 
-      - name: Build
-        run: cargo build --release --locked -p kaffy
+  build:
+    needs: check
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # Static (musl) so one binary runs on any x86_64 Linux, Alpine included.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-24.04
+          - target: aarch64-apple-darwin
+            os: macos-15
+          # Cross-compiled on the Apple Silicon runner.
+          - target: x86_64-apple-darwin
+            os: macos-15
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      TARGET: ${{ matrix.target }}
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Build (static Linux, in Alpine)
+        if: runner.os == 'Linux'
+        # Alpine's Rust links musl statically. librdkafka includes <curl/curl.h> even
+        # though it never links curl, hence curl-dev; zlib-static for the static link.
+        run: |
+          docker run --rm -v "$PWD":/src -w /src -e TARGET rust:1-alpine sh -euc '
+            apk add --no-cache -q build-base cmake perl linux-headers curl-dev zlib-static
+            cargo build --release --locked -p kaffy --target "$TARGET"
+          '
+          sudo chown -R "$(id -u):$(id -g)" target
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: runner.os == 'macOS'
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        if: runner.os == 'macOS'
+        with:
+          key: ${{ matrix.target }}
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        run: cargo build --release --locked -p kaffy --target "$TARGET"
+
+      - name: Check the binary
+        run: |
+          bin="target/$TARGET/release/kaffy"
+          file "$bin"
+          case "$TARGET" in
+            *linux-musl)
+              file "$bin" | grep -q "statically linked" \
+                || { echo "::error::the Linux binary must be static"; exit 1; }
+              "$bin" --version ;;
+            *apple-darwin)
+              otool -L "$bin"
+              # Only the system's own libraries, which every Mac has.
+              if otool -L "$bin" | tail -n +2 | grep -vE '^[[:space:]]+/(System/Library|usr/lib)/'; then
+                echo "::error::the macOS binary links a non-system library"; exit 1
+              fi
+              if [ "$TARGET" = x86_64-apple-darwin ]; then
+                arch -x86_64 "$bin" --version || echo "::warning::Rosetta unavailable; not run"
+              else
+                "$bin" --version
+              fi ;;
+          esac
 
       - name: Package
         run: |
           name="kaffy-$TAG-$TARGET"
           mkdir -p "dist/$name"
-          cp target/release/kaffy README.md config.example.toml "dist/$name/"
-          ./target/release/kaffy --version
-          echo "Dynamic libraries:"; ldd target/release/kaffy
-          if ldd target/release/kaffy | grep -q libcurl; then
-            echo "::error::kaffy must not depend on libcurl at runtime"; exit 1
-          fi
+          cp "target/$TARGET/release/kaffy" README.md config.example.toml "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
-          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+          (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
           rm -r "dist/$name"
           ls -l dist
 
       - uses: actions/upload-artifact@v4
         with:
-          name: dist
+          name: dist-${{ matrix.target }}
           path: dist/
-
-      - name: GitHub release (kaffy, private)
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" dist/* --clobber
-          else
-            gh release create "$TAG" dist/* --title "kaffy $TAG" --generate-notes --verify-tag
-          fi
 
   publish:
     needs: build
+    if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     concurrency: folio-publish
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: dist
+          pattern: dist-*
+          merge-multiple: true
           path: dist
       - uses: actions/checkout@v4
         with:
@@ -98,21 +151,36 @@ jobs:
           ssh-key: ${{ secrets.FOLIO_DEPLOY_KEY }}
           path: folio
 
+      - name: GitHub release (kaffy, private)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber --repo "$REPO"
+          else
+            gh release create "$TAG" dist/* --title "kaffy $TAG" --generate-notes \
+              --verify-tag --repo "$REPO"
+          fi
+
       - name: Add release to folio
         run: |
           releases=folio/kaffy/releases
           mkdir -p "$releases/$TAG"
           cp dist/* "$releases/$TAG/"
-          archive="kaffy-$TAG-$TARGET.tar.gz"
-          sha256=$(cut -d' ' -f1 "dist/$archive.sha256")
-          size=$(stat -c %s "dist/$archive")
           printf '%s\n' "$TAG" > "$releases/latest.txt"
-          jq -n --arg tag "$TAG" --arg target "$TARGET" --arg file "$archive" \
-                --arg sha256 "$sha256" --argjson size "$size" \
-                --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            '{version: $tag, published_at: $date,
-              assets: [{target: $target, url: ($tag + "/" + $file), size: $size, sha256: $sha256}]}' \
-            > "$releases/latest.json"
+          assets='[]'
+          for archive in dist/*.tar.gz; do
+            file=$(basename "$archive")
+            target=${file#kaffy-$TAG-}
+            target=${target%.tar.gz}
+            assets=$(jq --arg target "$target" --arg url "$TAG/$file" \
+                        --arg sha256 "$(cut -d' ' -f1 "$archive.sha256")" \
+                        --argjson size "$(stat -c %s "$archive")" \
+              '. + [{target: $target, url: $url, size: $size, sha256: $sha256}]' <<<"$assets")
+          done
+          jq -n --arg tag "$TAG" --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson assets "$assets" \
+            '{version: $tag, published_at: $date, assets: $assets}' > "$releases/latest.json"
           cat "$releases/latest.json"
 
       - name: Push to folio
@@ -124,11 +192,57 @@ jobs:
           git commit -m "kaffy $TAG"
           git push
 
+  homebrew:
+    needs: publish
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    concurrency: homebrew-tap-publish
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          path: kaffy
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+      - uses: actions/checkout@v4
+        with:
+          repository: prasenjithiwale/homebrew-tap
+          ssh-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+          path: tap
+
+      - name: Update Formula/kaffy.rb
+        run: |
+          mkdir -p tap/Formula
+          kaffy/scripts/homebrew-formula.sh "$TAG" dist > tap/Formula/kaffy.rb
+          cat tap/Formula/kaffy.rb
+
+      - name: Push to homebrew-tap
+        working-directory: tap
+        run: |
+          git config user.name "kaffy release"
+          git config user.email "kaffy-release@users.noreply.github.com"
+          git add Formula/kaffy.rb
+          git commit -m "kaffy $TAG"
+          # Other projects publish to this tap too; retry on a race.
+          for attempt in 1 2 3; do
+            git push && exit 0
+            git pull --rebase
+          done
+          exit 1
+
   smoke-test:
     # Installs exactly as a user would, once GitHub Pages serves the new release.
-    needs: publish
-    runs-on: ubuntu-22.04
-    timeout-minutes: 15
+    needs: [publish, homebrew]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
       - name: Wait for GitHub Pages
         run: |
@@ -139,15 +253,31 @@ jobs:
           done
           echo "::error::Pages still serves '$latest' instead of $TAG"; exit 1
 
-      - name: Install on Ubuntu 22.04 with sh
+      - name: Install with sh
         run: |
           curl -fsSL "$SITE/install.sh" | sh
           "$HOME/.local/bin/kaffy" --version | tee /dev/stderr | grep -q "${TAG#v}"
 
-      - name: Install on Debian 12 with bash
+      - name: Install on Debian 12 and Alpine
+        if: runner.os == 'Linux'
         run: |
           docker run --rm -e TAG debian:12-slim bash -euc '
             apt-get update -qq && apt-get install -y -qq curl ca-certificates >/dev/null
             curl -fsSL '"$SITE"'/install.sh | bash
             /root/.local/bin/kaffy --version | tee /dev/stderr | grep -q "${TAG#v}"
           '
+          docker run --rm -e TAG alpine:3 sh -euc '
+            wget -qO- '"$SITE"'/install.sh | sh
+            /root/.local/bin/kaffy --version | tee /dev/stderr | grep -q "${TAG#v}"
+          '
+
+      - name: Install with Homebrew
+        if: runner.os == 'macOS'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: |
+          brew trust --formula prasenjithiwale/tap/kaffy || true
+          brew install prasenjithiwale/tap/kaffy
+          kaffy --version | tee /dev/stderr | grep -q "${TAG#v}"
+          brew test prasenjithiwale/tap/kaffy
