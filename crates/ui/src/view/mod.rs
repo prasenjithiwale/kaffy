@@ -48,9 +48,13 @@ fn render_header(frame: &mut Frame, area: Rect, state: &AppState) {
     spans.push(Span::styled("  │  ", theme::dim()));
     spans.push(match state.connection {
         Connection::Connecting => Span::styled("● connecting…", theme::warning()),
-        Connection::Connected { brokers } => {
-            Span::styled(format!("● connected · {brokers} brokers"), theme::ok())
-        }
+        Connection::Connected { brokers } => Span::styled(
+            format!(
+                "● connected · {brokers} broker{}",
+                if brokers == 1 { "" } else { "s" }
+            ),
+            theme::ok(),
+        ),
     });
     if let Some(tail) = &state.tail {
         spans.push(Span::styled("  │  ", theme::dim()));

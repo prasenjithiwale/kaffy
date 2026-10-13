@@ -47,6 +47,20 @@ Key presses and Kafka events become `Action`s; `AppState::update` applies them a
 (a Kafka command or a clipboard copy) for the app to carry out. Kafka I/O runs in background tasks behind channels,
 and the screen is redrawn at most ~30 times a second.
 
+## Local Kafka
+
+A single-node KRaft broker from Homebrew is enough for development:
+
+```sh
+brew install kafka
+brew services run kafka          # start in the background (`start` also launches it at login)
+scripts/seed-local.sh            # topics orders, payments, user-events, customer-profiles with sample data
+cargo run -- --bootstrap localhost:9092
+brew services stop kafka
+```
+
+Broker data lives in `/opt/homebrew/var/lib/kraft-combined-logs`, logs in `/opt/homebrew/var/log/kafka`.
+
 ## Development
 
 ```sh

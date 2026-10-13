@@ -225,6 +225,16 @@ fn assign(consumer: &StreamConsumer, topic: &str, start: StartAt) -> KafkaResult
     };
     let mut tpl = TopicPartitionList::new();
     for partition in topic_md.partitions() {
+        let offset = match start {
+            // An out-of-range offset would trigger auto.offset.reset and replay the
+            // whole partition, so clamp it to what the partition actually holds.
+            StartAt::Offset(n) => {
+                let (low, high) =
+                    consumer.fetch_watermarks(topic, partition.id(), METADATA_TIMEOUT)?;
+                Offset::Offset(n.clamp(low, high))
+            }
+            _ => offset,
+        };
         tpl.add_partition_offset(topic, partition.id(), offset)?;
     }
     if let StartAt::Timestamp(_) = start {
