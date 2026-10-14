@@ -5,7 +5,7 @@ See [docs/kafka-tui-feasibility.md](docs/kafka-tui-feasibility.md) for scope and
 
 ## Install
 
-On Linux x86_64 (static binary, any distribution) and macOS 11+ (Apple Silicon or Intel):
+On Linux x86_64 or arm64 (static binary, any distribution) and macOS 11+ (Apple Silicon or Intel):
 
 ```sh
 curl -fsSL https://prasenjithiwale.github.io/folio/kaffy/install.sh | sh
@@ -260,7 +260,7 @@ service container) on every push. Pushing a tag that matches the crate version r
 git tag v0.4.0 && git push origin v0.4.0
 ```
 
-`.github/workflows/release.yml` then builds a static Linux x86_64 binary (musl, in an Alpine container) and
+`.github/workflows/release.yml` then builds static Linux binaries for x86_64 and arm64 (musl, in an Alpine container) and
 macOS binaries for Apple Silicon and Intel, publishes the archives and checksums to the public
 [folio](https://github.com/prasenjithiwale/folio) site (`FOLIO_DEPLOY_KEY`, a write deploy key on folio),
 writes `Formula/kaffy.rb` into [homebrew-tap](https://github.com/prasenjithiwale/homebrew-tap)

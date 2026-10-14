@@ -45,6 +45,10 @@ class Kaffy < Formula
       url "$(url x86_64-unknown-linux-musl)"
       sha256 "$(sha x86_64-unknown-linux-musl)"
     end
+    on_arm do
+      url "$(url aarch64-unknown-linux-musl)"
+      sha256 "$(sha aarch64-unknown-linux-musl)"
+    end
   end
 
   def install

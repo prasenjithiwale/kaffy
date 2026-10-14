@@ -1,4 +1,4 @@
-# Builds kaffy for Linux and macOS when a v* tag is pushed, publishes the archives
+# Builds kaffy for Linux (x86_64, arm64) and macOS when a v* tag is pushed, publishes the archives
 # to the public folio site (github.com/prasenjithiwale/folio), which serves the
 # install script, and updates the Homebrew formula in prasenjithiwale/homebrew-tap:
 #
@@ -77,9 +77,11 @@ jobs:
       fail-fast: true
       matrix:
         include:
-          # Static (musl) so one binary runs on any x86_64 Linux, Alpine included.
+          # Static (musl) so one binary runs on any Linux, Alpine included; arm64 builds natively on the arm runner.
           - target: x86_64-unknown-linux-musl
             os: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
           - target: aarch64-apple-darwin
             os: macos-15
           # Cross-compiled on the Apple Silicon runner.
@@ -265,7 +267,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-15]
+        os: [ubuntu-22.04, ubuntu-24.04-arm, macos-15]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:

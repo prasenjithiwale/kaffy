@@ -36,14 +36,15 @@ The release pipeline is automated; a version tag triggers it. Steps (as done for
    1. **check / licenses / build:** checks the version, collects `THIRD-PARTY-LICENSES.txt`
       (`scripts/third-party-licenses.sh`: librdkafka, OpenSSL and zlib texts plus every Rust crate via
       cargo-about and `about.toml`; a crate under a license missing from `accepted` fails the job), builds
-      `x86_64-unknown-linux-musl` (static, in an Alpine container), `aarch64-apple-darwin` and `x86_64-apple-darwin` (cross-built on macos-15), and checks
-      each binary links only system libraries. Each archive ships the binary, README, example config
+      `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` (static, in an Alpine container; arm64 on
+      the free `ubuntu-24.04-arm` runner, which needs the repo to stay public), `aarch64-apple-darwin` and
+      `x86_64-apple-darwin` (cross-built on macos-15), and checks each binary links only system libraries. Each archive ships the binary, README, example config
       and the licenses file.
    2. **publish:** commits `kaffy/releases/vX.Y.Z/*`, `latest.txt` and `latest.json` into folio through
       the `FOLIO_DEPLOY_KEY` deploy key, and creates the GitHub release.
    3. **homebrew:** writes `Formula/kaffy.rb` to prasenjithiwale/homebrew-tap with `HOMEBREW_TAP_DEPLOY_KEY`.
    4. **smoke-test:** waits for GitHub Pages, then runs the documented install one-liner on Ubuntu 22.04,
-      Debian 12, Alpine and macOS, and `brew install prasenjithiwale/tap/kaffy` on macOS.
+      Debian 12, Alpine (x86_64 and arm64) and macOS, and `brew install prasenjithiwale/tap/kaffy` on macOS.
    If the smoke tests time out with "Pages still serves" the old version, the folio Pages build has
    stalled (it happened for v0.4.0: stuck "building" for two hours). Request a new build with
    `gh api -X POST repos/prasenjithiwale/folio/pages/builds`, wait for `latest.txt` to change, then
@@ -136,7 +137,7 @@ in both the UI and the worker.
 - **MSK IAM:** `aws_msk_iam` on a profile; SigV4 signer in `crates/kafka/src/msk_iam.rs`, token set with
   `rd_kafka_oauthbearer_set_token` and renewed every 5 minutes. Not tested against a real MSK cluster.
   Confluent Cloud works over SASL/PLAIN (documented).
-- **Distribution:** static musl Linux (built in Alpine), macOS arm64 + x86_64, Homebrew formula.
+- **Distribution:** static musl Linux x86_64 + arm64 (built in Alpine), macOS arm64 + x86_64, Homebrew formula.
 - **Website:** folio redesigned (home: records in a log; kaffy: dark hero, screen picker). The snapshot
   example renders true colors as inline styles.
 
