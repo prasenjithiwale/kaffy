@@ -1,0 +1,21 @@
+name: Feature request
+description: An idea for kaffy
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The task or problem, and how you handle it today.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help?
+      description: How you imagine it working in kaffy. Screens and keys are welcome but not required.
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else?
+      description: Your setup (Confluent Cloud, MSK, Redpanda, …), other tools that do this well, screenshots.

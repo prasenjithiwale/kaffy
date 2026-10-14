@@ -325,6 +325,11 @@ in a directory holding a `kaffy` binary.
 
 Dev builds skip debug info for dependencies (see `Cargo.toml`) to keep `target/` small.
 
+## Contributing
+
+Bug reports, ideas and pull requests are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md). Please report
+security problems privately, as described in [SECURITY.md](SECURITY.md).
+
 ## License
 
 kaffy is licensed under either of the [Apache License, Version 2.0](LICENSE-APACHE) or the

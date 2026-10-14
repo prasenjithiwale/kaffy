@@ -1,0 +1,73 @@
+name: Bug report
+description: Something in kaffy doesn't work as it should
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Please remove passwords, tokens, broker addresses and message contents you
+        can't share. Security problems go through [a private report](https://github.com/prasenjithiwale/kaffy/security/advisories/new) instead.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Does it also happen with `kaffy --demo`?
+      placeholder: |
+        1. kaffy --profile staging
+        2. Open topic `orders`, press `/`, type …
+        3. …
+  - type: input
+    id: version
+    attributes:
+      label: kaffy version
+      description: Output of `kaffy --version`.
+      placeholder: kaffy 0.4.1
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - macOS, Apple Silicon
+        - macOS, Intel
+        - Linux x86_64
+        - Linux arm64
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Installed with
+      options:
+        - Install script
+        - Homebrew
+        - cargo install
+        - Built from source
+        - Manual download
+  - type: input
+    id: cluster
+    attributes:
+      label: Kafka and authentication
+      description: Distribution and version, and how kaffy connects.
+      placeholder: Apache Kafka 3.9 (KRaft), SASL_SSL with SCRAM-SHA-512; Schema Registry 7.6
+  - type: input
+    id: terminal
+    attributes:
+      label: Terminal
+      placeholder: iTerm2, Ghostty, Windows Terminal over SSH, tmux …
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: |
+        From `~/Library/Caches/kaffy/kaffy.log` (macOS) or `~/.cache/kaffy/kaffy.log` (Linux); `RUST_LOG=debug` adds detail.
+      render: text
