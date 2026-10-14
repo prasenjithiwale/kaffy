@@ -83,7 +83,23 @@ impl TestTopic {
         results.into_iter().for_each(|r| {
             r.unwrap();
         });
-        Self { name, admin }
+        // CreateTopics returns before every broker's metadata has the topic; a produce sent
+        // in that window fails with "topic does not exist".
+        for _ in 0..40 {
+            let metadata = admin
+                .inner()
+                .fetch_metadata(Some(&name), Duration::from_secs(5))
+                .unwrap();
+            if metadata
+                .topics()
+                .first()
+                .is_some_and(|t| t.error().is_none() && t.partitions().len() == 2)
+            {
+                return Self { name, admin };
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        panic!("topic {name} never appeared in the metadata");
     }
 }
 
