@@ -1,35 +1,73 @@
 # kaffy
 
-A terminal UI for exploring and operating Kafka clusters, written in Rust.
-See [docs/kafka-tui-feasibility.md](docs/kafka-tui-feasibility.md) for scope and roadmap.
+A terminal UI for exploring and operating Kafka clusters. Follow messages live, jump to any offset or time,
+read Avro and Protobuf through your Schema Registry, watch consumer lag, and change things safely: every
+write shows a preview and waits for you to confirm. One static binary for Linux and macOS, written in Rust.
+
+![kaffy in demo mode: filtering a topic, reading a message, checking consumer lag, previewing an offset reset and diffing a schema](https://raw.githubusercontent.com/prasenjithiwale/folio/main/kaffy/media/preview.gif)
+
+**Website:** https://prasenjithiwale.github.io/folio/kaffy/
+
+## Features
+
+- **Messages:** live tail across partitions; seek to the beginning, the end, an offset or a time (`-15m`,
+  `2026-10-13 09:30`); filter by text, regex, field, header, partition and time range; copy, export to
+  JSON/NDJSON/CSV. The viewer never commits offsets, so it doesn't disturb any consumer group.
+- **Decoding:** Avro, JSON Schema and Protobuf through a Confluent-compatible Schema Registry, or plain
+  Protobuf from your `.proto` files with no registry and no `protoc`.
+- **Consumer groups:** state, members and lag for every group, with trends showing who is falling behind,
+  and per-partition lag for one group.
+- **Safe writes:** reset offsets, produce (in `$EDITOR`), edit and re-produce, replay a filtered range,
+  tombstones, create/delete topics, change topic configs, delete records, register schemas. Each one shows
+  exactly what will change first. Profiles are read-only unless you say otherwise.
+- **Schemas and brokers:** browse subjects, diff versions, edit with a compatibility check; see broker
+  health and every offline or under-replicated partition.
+- **Clusters:** plaintext, SSL/mTLS, SASL (PLAIN, SCRAM), Confluent Cloud and Amazon MSK with IAM. Passwords
+  come from environment variables, never the config file.
+- **Comfort:** a fuzzy command palette (`:`), rebindable keys, dark, light and terminal-color themes, and
+  `kaffy --demo`, a fake cluster with live data to try everything on.
+
+## Why kaffy?
+
+- **vs. `kcat` and the `kafka-*.sh` scripts:** those are for scripts and one-off commands. kaffy is for
+  looking around: browsing, filtering and decoding interactively, and making changes you can see before
+  they happen.
+- **vs. web UIs (Kafka UI, AKHQ, Redpanda Console, …):** those are great when your team runs one. kaffy
+  needs nothing deployed: it runs wherever you can reach the brokers, including an SSH session on a bastion
+  host during an incident, with your own credentials.
+- **Built to be safe on production:** read-only by default, enforced in the UI and again in the Kafka
+  worker; a preview for every write; typed confirmation for destructive ones and on `prod = true` profiles.
 
 ## Install
 
-On Linux x86_64 or arm64 (static binary, any distribution) and macOS 11+ (Apple Silicon or Intel):
+Linux on x86_64 or arm64 (static binary, any distribution) and macOS 11+ (Apple Silicon or Intel):
 
 ```sh
 curl -fsSL https://prasenjithiwale.github.io/folio/kaffy/install.sh | sh
 ```
 
-Or with Homebrew, which needs you to trust the tap's formula first:
+The script checks the download's SHA-256 checksum and puts `kaffy` in `~/.local/bin`. Or use Homebrew, which
+needs you to trust the tap's formula first:
 
 ```sh
 brew trust --formula prasenjithiwale/tap/kaffy && brew install prasenjithiwale/tap/kaffy
 ```
 
-See https://prasenjithiwale.github.io/folio/kaffy/ for options and manual downloads.
+Archives and checksums for manual download are on the [website](https://prasenjithiwale.github.io/folio/kaffy/#install).
+To build from source, see [Development](#development).
 
 ## Quick start
 
 ```sh
-cargo run -- --demo                       # fake cluster, no broker needed
-cargo run -- --bootstrap localhost:9092   # plaintext broker, no config file
-cargo run -- --profile staging            # profile from ~/.config/kaffy/config.toml
-cargo run -- --bootstrap localhost:9092 --schema-registry http://localhost:8081
+kaffy --demo                                  # fake cluster with live data, no broker needed
+kaffy --bootstrap localhost:9092              # plaintext broker, no config file
+kaffy --bootstrap localhost:9092 --schema-registry http://localhost:8081
+kaffy --profile staging                       # a profile from ~/.config/kaffy/config.toml
 ```
 
-The first build compiles librdkafka and OpenSSL from source (needs `cmake`), which takes a few minutes.
-Logs are written to `~/Library/Caches/kaffy/kaffy.log` on macOS (`~/.cache/kaffy/kaffy.log` on Linux); set `RUST_LOG=debug` for more.
+Press `?` on any screen for its keys, and `1`–`4` to switch between topics, consumer groups, schemas and
+brokers. Logs go to `~/Library/Caches/kaffy/kaffy.log` on macOS (`~/.cache/kaffy/kaffy.log` on Linux); set
+`RUST_LOG=debug` for more.
 
 ## Configuration
 
@@ -215,7 +253,7 @@ crates/
 ├── app/     # `kaffy` binary: CLI, event loop, keymap, clipboard
 ├── ui/      # AppState + reducer, dialogs, produce templates, export, ratatui views
 ├── kafka/   # rdkafka worker (tail, seek, groups, resets, produce, replay) and the --demo fake cluster
-├── schema/  # payload decoding (JSON / text / hex; Schema Registry later)
+├── schema/  # payload decoding: JSON, text, hex, Avro, JSON Schema, Protobuf; Schema Registry client
 └── config/  # cluster profiles → librdkafka properties
 ```
 
@@ -239,7 +277,13 @@ Broker data lives in `/opt/homebrew/var/lib/kraft-combined-logs`, logs in `/opt/
 
 ## Development
 
+Building needs Rust 1.85+ and `cmake`: the first build compiles librdkafka and OpenSSL from source, which
+takes a few minutes. The original scope and roadmap are in
+[docs/kafka-tui-feasibility.md](docs/kafka-tui-feasibility.md).
+
 ```sh
+cargo build --release                       # target/release/kaffy
+cargo run -- --demo
 cargo test --workspace
 cargo clippy --workspace --all-targets
 cargo test -p kaffy-kafka --test local_broker -- --ignored   # end-to-end, needs a broker on localhost:9092

@@ -11,7 +11,8 @@ Last updated: 2026-10-13. Plan and feature list: [kafka-tui-feasibility.md](kafk
 | 3. Schema & admin: Schema Registry browser/diff/register, Protobuf, topic create/delete/config, DeleteRecords, tombstones | done | v0.3.0 |
 | 4. Polish: UI revamp and themes, keybindings, command palette, broker health, MSK IAM / Confluent Cloud auth, static Linux + macOS builds, Homebrew | done | v0.4.0 |
 
-v0.4.0 was released on 2026-10-13. The workspace version is `0.4.0`.
+v0.4.1 was released on 2026-10-14 (Linux arm64 build, MIT OR Apache-2.0 license, license files in archives).
+The workspace version is `0.4.1`.
 
 ## Releasing
 
@@ -143,8 +144,9 @@ in both the UI and the worker.
 
 ## Next
 
-The roadmap's phases are done. Candidates: Linux arm64 builds, code signing/notarization for macOS,
-a real MSK IAM test, Kafka Connect browsing (listed out of scope in the plan, "could be a later plugin").
+The roadmap's phases are done. Candidates: publish to crates.io (the name `kaffy` was free on
+2026-10-14), SECURITY.md / CONTRIBUTING.md / issue templates, branch protection on `main`, homebrew-core once
+the repo has ~75 stars, code signing/notarization for macOS (only matters for browser downloads), a real MSK IAM test, Kafka Connect browsing (listed out of scope in the plan, "could be a later plugin").
 Ask the user before starting one.
 
 ## Working agreements with the user

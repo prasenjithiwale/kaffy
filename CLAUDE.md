@@ -5,8 +5,9 @@ usage and `docs/STATUS.md` for the full project state, environment notes and rel
 
 ## Start here
 
-**State:** v0.4.0 is released; Phases 1–4 of the roadmap are done. See `docs/STATUS.md` ("Next") for
-candidate follow-ups, and ask the user which to take on. Releases follow "Releasing" in the same file.
+**State:** v0.4.1 is released (repo public, MIT OR Apache-2.0); Phases 1–4 of the roadmap are done. See
+`docs/STATUS.md` ("Next") for candidate follow-ups, and ask the user which to take on. Releases follow
+"Releasing" in the same file.
 
 ## Rules that bit before
 
