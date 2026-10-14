@@ -38,6 +38,20 @@ write shows a preview and waits for you to confirm. One static binary for Linux 
 - **Built to be safe on production:** read-only by default, enforced in the UI and again in the Kafka
   worker; a preview for every write; typed confirmation for destructive ones and on `prod = true` profiles.
 
+## Limitations
+
+Things kaffy doesn't do yet, so you know before you try:
+
+- **No Windows build.** Linux (x86_64, arm64) and macOS only. The static Linux build should run under WSL2,
+  but that is untested.
+- **Authentication:** SASL PLAIN, SCRAM-SHA-256/512, TLS client certificates and Amazon MSK IAM. Kerberos
+  (GSSAPI) and generic OAuth/OIDC (SASL/OAUTHBEARER outside MSK) aren't supported.
+- **Kafka only, plus Schema Registry:** no Kafka Connect, ksqlDB, ACLs or quotas, and no Confluent Cloud or
+  MSK management APIs (environments, API keys, cluster settings).
+- **Messages are held in memory:** up to 5,000 per topic view, starting from the last 100 per partition by
+  default. Use seek and the filter to reach older data; export writes the messages loaded and shown.
+- **Payload formats:** JSON, text, Avro, JSON Schema and Protobuf; anything else is shown as a hex dump.
+
 ## Install
 
 Linux on x86_64 or arm64 (static binary, any distribution) and macOS 11+ (Apple Silicon or Intel):
