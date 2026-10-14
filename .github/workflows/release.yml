@@ -49,8 +49,30 @@ jobs:
             echo "::error::Tag $TAG does not match Cargo version v$version"; exit 1
           fi
 
-  build:
+  licenses:
     needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
+      - name: Collect third-party licenses
+        run: |
+          scripts/third-party-licenses.sh > THIRD-PARTY-LICENSES.txt
+          grep -q '^librdkafka' THIRD-PARTY-LICENSES.txt
+          grep -q '^Rust crates' THIRD-PARTY-LICENSES.txt
+          wc -c THIRD-PARTY-LICENSES.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: third-party-licenses
+          path: THIRD-PARTY-LICENSES.txt
+
+  build:
+    needs: [check, licenses]
     strategy:
       fail-fast: true
       matrix:
@@ -118,11 +140,14 @@ jobs:
               fi ;;
           esac
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: third-party-licenses
       - name: Package
         run: |
           name="kaffy-$TAG-$TARGET"
           mkdir -p "dist/$name"
-          cp "target/$TARGET/release/kaffy" README.md config.example.toml "dist/$name/"
+          cp "target/$TARGET/release/kaffy" README.md config.example.toml LICENSE-MIT LICENSE-APACHE THIRD-PARTY-LICENSES.txt "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
           rm -r "dist/$name"
@@ -151,7 +176,7 @@ jobs:
           ssh-key: ${{ secrets.FOLIO_DEPLOY_KEY }}
           path: folio
 
-      - name: GitHub release (kaffy, private)
+      - name: GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}

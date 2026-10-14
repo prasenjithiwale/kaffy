@@ -33,11 +33,14 @@ The release pipeline is automated; a version tag triggers it. Steps (as done for
 4. **Commit and push kaffy**, wait for CI to pass, then tag:
    `git tag -a vX.Y.Z -m "kaffy vX.Y.Z: ..." && git push origin vX.Y.Z`.
 5. **Watch the Release workflow** (`gh run list --repo prasenjithiwale/kaffy`). Its jobs are:
-   1. **check / build:** checks the version, then builds `x86_64-unknown-linux-musl` (static, in an Alpine
-      container), `aarch64-apple-darwin` and `x86_64-apple-darwin` (cross-built on macos-15), and checks
-      each binary links only system libraries.
+   1. **check / licenses / build:** checks the version, collects `THIRD-PARTY-LICENSES.txt`
+      (`scripts/third-party-licenses.sh`: librdkafka, OpenSSL and zlib texts plus every Rust crate via
+      cargo-about and `about.toml`; a crate under a license missing from `accepted` fails the job), builds
+      `x86_64-unknown-linux-musl` (static, in an Alpine container), `aarch64-apple-darwin` and `x86_64-apple-darwin` (cross-built on macos-15), and checks
+      each binary links only system libraries. Each archive ships the binary, README, example config
+      and the licenses file.
    2. **publish:** commits `kaffy/releases/vX.Y.Z/*`, `latest.txt` and `latest.json` into folio through
-      the `FOLIO_DEPLOY_KEY` deploy key, and creates the (private) GitHub release.
+      the `FOLIO_DEPLOY_KEY` deploy key, and creates the GitHub release.
    3. **homebrew:** writes `Formula/kaffy.rb` to prasenjithiwale/homebrew-tap with `HOMEBREW_TAP_DEPLOY_KEY`.
    4. **smoke-test:** waits for GitHub Pages, then runs the documented install one-liner on Ubuntu 22.04,
       Debian 12, Alpine and macOS, and `brew install prasenjithiwale/tap/kaffy` on macOS.
@@ -53,7 +56,7 @@ than Homebrew's and has failed on new lints before.
 
 ## Repositories and services
 
-- **kaffy:** github.com/prasenjithiwale/kaffy, **private**. CI: `.github/workflows/ci.yml` (fmt, clippy
+- **kaffy:** github.com/prasenjithiwale/kaffy, public, MIT OR Apache-2.0. CI: `.github/workflows/ci.yml` (fmt, clippy
   `-D warnings`, unit tests, broker tests against an `apache/kafka` service container). Releases:
   `.github/workflows/release.yml` (on `v*` tags).
 - **folio:** github.com/prasenjithiwale/folio, **public**, GitHub Pages from `main` /. Plain HTML/CSS,

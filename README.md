@@ -269,5 +269,15 @@ one-liner on Ubuntu, Debian, Alpine and macOS and with `brew` on macOS. Run it b
 `dry_run: true` to build and check the binaries without publishing anything.
 
 The screens on the website are rendered from the real UI with `cargo run -p kaffy-ui --example snapshot`.
+The recorded tour and screenshots come from `dev/preview.tape` ([vhs](https://github.com/charmbracelet/vhs)), run
+in a directory holding a `kaffy` binary.
 
 Dev builds skip debug info for dependencies (see `Cargo.toml`) to keep `target/` small.
+
+## License
+
+kaffy is licensed under either of the [Apache License, Version 2.0](LICENSE-APACHE) or the
+[MIT license](LICENSE-MIT), at your option. Unless you state otherwise, any contribution you submit
+for inclusion in kaffy is dual-licensed the same way, without additional terms or conditions.
+
+Release archives include `THIRD-PARTY-LICENSES.txt`, the licenses of everything compiled into the binary.

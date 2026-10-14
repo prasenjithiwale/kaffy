@@ -27,6 +27,7 @@ class Kaffy < Formula
   desc "Terminal UI for exploring and operating Kafka clusters"
   homepage "https://prasenjithiwale.github.io/folio/kaffy/"
   version "${tag#v}"
+  license any_of: ["MIT", "Apache-2.0"]
 
   on_macos do
     on_arm do
@@ -49,6 +50,8 @@ class Kaffy < Formula
   def install
     bin.install "kaffy"
     pkgshare.install "config.example.toml"
+    doc.install "THIRD-PARTY-LICENSES.txt"
+    prefix.install "LICENSE-MIT", "LICENSE-APACHE"
   end
 
   def caveats
