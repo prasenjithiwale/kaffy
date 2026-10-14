@@ -3,9 +3,11 @@ name = "kaffy-schema"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-publish.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Payload decoding and Schema Registry client for kaffy, a terminal UI for Kafka"
+homepage.workspace = true
+documentation = "https://github.com/prasenjithiwale/kaffy"
 
 [dependencies]
 apache-avro.workspace = true

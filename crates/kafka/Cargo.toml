@@ -3,9 +3,11 @@ name = "kaffy-kafka"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-publish.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Kafka client worker and demo cluster for kaffy, a terminal UI for Kafka"
+homepage.workspace = true
+documentation = "https://github.com/prasenjithiwale/kaffy"
 
 [dependencies]
 kaffy-config.workspace = true

@@ -53,6 +53,13 @@ needs you to trust the tap's formula first:
 brew trust --formula prasenjithiwale/tap/kaffy && brew install prasenjithiwale/tap/kaffy
 ```
 
+Or build it with Cargo (Rust 1.85+ and `cmake`; librdkafka and OpenSSL are compiled from source, which takes
+a few minutes):
+
+```sh
+cargo install --locked kaffy
+```
+
 Archives and checksums for manual download are on the [website](https://prasenjithiwale.github.io/folio/kaffy/#install).
 To build from source, see [Development](#development).
 

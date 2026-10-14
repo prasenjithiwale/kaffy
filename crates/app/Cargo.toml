@@ -3,9 +3,13 @@ name = "kaffy"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-publish.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "A terminal UI for exploring and operating Kafka clusters"
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["kafka", "tui", "terminal", "schema-registry", "avro"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "kaffy"
