@@ -57,6 +57,7 @@ pub enum InputKind {
     SeekTimestamp,
     ResetTime,
     ResetOffset,
+    ResetTopic,
     ReplayTarget,
     ReplayStart,
     ReplayEnd,
@@ -78,6 +79,7 @@ impl InputKind {
                 "reset to the first message at or after (-1h, 2026-10-13 09:30, ...): "
             }
             Self::ResetOffset => "reset every partition to offset: ",
+            Self::ResetTopic => "reset which topic (its name, or part of it): ",
             Self::ReplayTarget => "replay into topic: ",
             Self::ReplayStart => "replay from (beginning, an offset, or a time like -1h): ",
             Self::ReplayEnd => "replay until (now, an offset, or a time): ",
@@ -99,6 +101,11 @@ enum Wizard {
     Reset {
         group: String,
         topic: Option<String>,
+    },
+    /// Picking one of a group's many topics by name.
+    ResetTopic {
+        group: String,
+        topics: Vec<String>,
     },
     Replay {
         source: String,
@@ -1371,7 +1378,17 @@ impl AppState {
                 return Some(Effect::Kafka(Command::ListGroups));
             }
             Action::ResetOffsets => {
-                let (name, topics) = (view.name.clone(), view.topics());
+                let (name, mut topics) = (view.name.clone(), view.topics());
+                // The selected row's topic comes first, as key 1.
+                let current = view
+                    .detail
+                    .as_ref()
+                    .and_then(|d| d.partitions.get(selected))
+                    .map(|p| p.topic.clone());
+                if let Some(i) = current.and_then(|t| topics.iter().position(|x| *x == t)) {
+                    let topic = topics.remove(i);
+                    topics.insert(0, topic);
+                }
                 return self.begin_reset(name, topics);
             }
             _ => {}
@@ -1403,6 +1420,15 @@ impl AppState {
                     .enumerate()
                     .map(|(i, t)| (char::from(b'1' + i as u8), t.clone())),
             );
+            if topics.len() > 9 {
+                options.push((
+                    '/',
+                    format!(
+                        "another of its topics… ({} more; type a name)",
+                        topics.len() - 9
+                    ),
+                ));
+            }
             self.dialog = Some(Dialog::Choice {
                 title: format!("Reset offsets of {group}: which topics?"),
                 options,
@@ -1527,7 +1553,13 @@ impl AppState {
             ChoicePurpose::ResetScope { group, topics } => {
                 let topic = match c {
                     'a' => None,
-                    n => topics.get((n as u8 - b'1') as usize).cloned(),
+                    '/' => {
+                        self.wizard = Some(Wizard::ResetTopic { group, topics });
+                        return self.update(Action::BeginInput(InputKind::ResetTopic));
+                    }
+                    n => topics
+                        .get(usize::from((n as u8).wrapping_sub(b'1')))
+                        .cloned(),
                 };
                 self.choose_reset_target(group, topic);
                 None
@@ -1997,6 +2029,27 @@ impl AppState {
                         None
                     }
                 };
+            }
+            (InputKind::ResetTopic, Some(Wizard::ResetTopic { group, topics })) => {
+                // The exact name, or a part of it that only one topic contains.
+                let matching: Vec<&String> = match topics.iter().find(|t| *t == text) {
+                    Some(exact) => vec![exact],
+                    None => topics.iter().filter(|t| t.contains(text)).collect(),
+                };
+                match matching.as_slice() {
+                    [topic] if !text.is_empty() => {
+                        let topic = (*topic).clone();
+                        self.choose_reset_target(group, Some(topic));
+                    }
+                    [] | [_] => {
+                        self.flash_error(format!("{group} has no offsets on a topic like {text:?}"))
+                    }
+                    many => self.flash_error(format!(
+                        "{text:?} matches {} of {group}'s topics; type more of the name",
+                        many.len()
+                    )),
+                }
+                return None;
             }
             (InputKind::ResetOffset, Some(Wizard::Reset { group, topic })) => {
                 return match text.parse::<i64>() {
@@ -2716,6 +2769,115 @@ mod tests {
                 end: 50,
             }],
         }
+    }
+
+    /// A writable state on the groups tab with one group on `topics`.
+    fn wide_group(topics: &[&str]) -> AppState {
+        let mut state = writable(false);
+        state.update(Action::ShowGroups);
+        state.on_event(Event::Groups(vec![kaffy_kafka::GroupSummary {
+            name: "wide".into(),
+            state: kaffy_kafka::GroupState::Empty,
+            members: 0,
+            topics: topics.iter().map(|t| (*t).to_owned()).collect(),
+            lag: Some(1),
+        }]));
+        state
+    }
+
+    fn reset_target_title(state: &AppState) -> Option<&str> {
+        match &state.dialog {
+            Some(Dialog::Choice {
+                title,
+                purpose: ChoicePurpose::ResetTarget { .. },
+                ..
+            }) => Some(title),
+            _ => None,
+        }
+    }
+
+    fn type_input(state: &mut AppState, text: &str) {
+        for c in text.chars() {
+            state.update(Action::InputChar(c));
+        }
+        state.update(Action::InputSubmit);
+    }
+
+    #[test]
+    fn reset_reaches_every_topic_of_a_wide_group() {
+        let topics: Vec<String> = (1..=12).map(|i| format!("orders-{i:02}")).collect();
+        let names: Vec<&str> = topics.iter().map(String::as_str).collect();
+        let mut state = wide_group(&names);
+        state.update(Action::ResetOffsets);
+        let Some(Dialog::Choice { options, .. }) = &state.dialog else {
+            panic!("expected the scope menu");
+        };
+        assert_eq!(
+            options.len(),
+            1 + 9 + 1,
+            "all, nine topics, and type a name"
+        );
+        assert_eq!(options.last().unwrap().0, '/');
+
+        state.update(Action::DialogKey('/'));
+        assert_eq!(
+            state.input.as_ref().map(|i| i.kind),
+            Some(InputKind::ResetTopic)
+        );
+        type_input(&mut state, "11");
+        assert_eq!(
+            reset_target_title(&state),
+            Some("Reset wide on orders-11 to:")
+        );
+
+        // Ambiguous and unknown names explain themselves and stop.
+        let mut state = wide_group(&names);
+        state.update(Action::ResetOffsets);
+        state.update(Action::DialogKey('/'));
+        type_input(&mut state, "orders-1");
+        assert!(state.dialog.is_none());
+        assert!(state.flash.as_ref().unwrap().text.contains("matches 3"));
+
+        let mut state = wide_group(&names);
+        state.update(Action::ResetOffsets);
+        state.update(Action::DialogKey('/'));
+        type_input(&mut state, "payments");
+        assert!(state.flash.as_ref().unwrap().text.contains("no offsets"));
+
+        // The exact name wins even when it is part of others.
+        let mut state = wide_group(&names);
+        state.update(Action::ResetOffsets);
+        state.update(Action::DialogKey('/'));
+        type_input(&mut state, "orders-01");
+        assert_eq!(
+            reset_target_title(&state),
+            Some("Reset wide on orders-01 to:")
+        );
+    }
+
+    #[test]
+    fn reset_from_group_detail_offers_the_selected_topic_first() {
+        let mut state = wide_group(&["audit", "billing", "orders"]);
+        state.update(Action::Open);
+        let lag = |topic: &str| kaffy_kafka::PartitionLag {
+            topic: topic.into(),
+            partition: 0,
+            committed: 1,
+            end: 2,
+        };
+        state.on_event(Event::GroupDetail(kaffy_kafka::GroupDetail {
+            name: "wide".into(),
+            state: kaffy_kafka::GroupState::Empty,
+            members: Vec::new(),
+            partitions: vec![lag("audit"), lag("billing"), lag("orders")],
+        }));
+        state.update(Action::Down);
+        state.update(Action::Down);
+        state.update(Action::ResetOffsets);
+        let Some(Dialog::Choice { options, .. }) = &state.dialog else {
+            panic!("expected the scope menu");
+        };
+        assert_eq!(options[1], ('1', "orders".to_owned()));
     }
 
     #[test]

@@ -270,7 +270,8 @@ independently of the UI. Every change shows a preview first and is sent only aft
 on profiles with `prod = true` you type the group or topic name instead.
 
 - **Reset offsets** (`R` on a group): earliest, latest, a time, or an offset, for all of the group's topics
-  or one. The preview shows current and new offsets and how many messages will be reprocessed or skipped.
+  or one (from a group's detail, the selected row's topic is offered first; with more than nine topics,
+  `/` lets you type one's name). The preview shows current and new offsets and how many messages will be reprocessed or skipped.
   Kafka only accepts resets while the group has no active members; kaffy checks this again just before
   committing and verifies the committed offsets afterwards.
 - **Produce** (`p`) opens `$VISUAL`/`$EDITOR` (default `vi`) with a template: topic, partition (or `auto`
