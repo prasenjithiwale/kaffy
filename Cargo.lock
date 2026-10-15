@@ -1454,6 +1454,7 @@ name = "kaffy-ui"
 version = "0.4.1"
 dependencies = [
  "chrono",
+ "kaffy-config",
  "kaffy-kafka",
  "kaffy-schema",
  "ratatui",

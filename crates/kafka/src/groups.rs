@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use kaffy_config::NameFilter;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer};
 use rdkafka::error::{KafkaError, KafkaResult};
@@ -30,15 +31,24 @@ pub(crate) struct Groups {
     /// its offsets. They never subscribe, so they never join the group.
     clients: Mutex<HashMap<String, Arc<BaseConsumer>>>,
     auth: Auth,
+    /// The profile's `groups` patterns: other groups are skipped before any
+    /// offset lookups, which is where listing groups spends its time.
+    scope: NameFilter,
 }
 
 impl Groups {
-    pub(crate) fn new(base: ClientConfig, admin: Arc<BaseConsumer>, auth: Auth) -> Self {
+    pub(crate) fn new(
+        base: ClientConfig,
+        admin: Arc<BaseConsumer>,
+        auth: Auth,
+        scope: NameFilter,
+    ) -> Self {
         Self {
             base,
             admin,
             clients: Mutex::new(HashMap::new()),
             auth,
+            scope,
         }
     }
 
@@ -49,7 +59,9 @@ impl Groups {
         let mut committed_by_group = Vec::new();
         for group in groups.groups() {
             // Only consumer groups have offsets; skip Connect workers and the like.
-            if !matches!(group.protocol_type(), "consumer" | "") {
+            if !matches!(group.protocol_type(), "consumer" | "")
+                || !self.scope.matches(group.name())
+            {
                 continue;
             }
             let committed = self.committed(group.name(), &partitions);

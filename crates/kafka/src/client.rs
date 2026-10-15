@@ -51,7 +51,12 @@ pub fn spawn(profile: &Profile) -> Result<Worker, Error> {
     let (command_tx, command_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::channel(EVENT_BUFFER);
     let ctx = Context {
-        groups: Arc::new(Groups::new(base.clone(), metadata.clone(), auth.clone())),
+        groups: Arc::new(Groups::new(
+            base.clone(),
+            metadata.clone(),
+            auth.clone(),
+            profile.groups.clone(),
+        )),
         auth,
         base,
         metadata,

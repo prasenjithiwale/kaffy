@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use crossterm::event::{Event as TermEvent, EventStream, KeyEventKind};
 use futures::StreamExt;
-use kaffy_config::{Config, Profile, SchemaRegistry};
+use kaffy_config::{Config, NameFilter, Profile, SchemaRegistry};
 use kaffy_kafka::{Command, Worker};
 use kaffy_ui::keymap::Keymap;
 use kaffy_ui::theme::ThemeName;
@@ -41,6 +41,15 @@ struct Args {
     #[arg(long, value_name = "NAME")]
     theme: Option<String>,
 
+    /// Show only these topics: comma-separated globs, `!` excludes (e.g. 'orders-*,!*.dlq');
+    /// overrides the profile's `topics`
+    #[arg(long, value_name = "PATTERNS", value_parser = NameFilter::parse_list)]
+    topics: Option<NameFilter>,
+
+    /// Show only these consumer groups (same syntax); overrides the profile's `groups`
+    #[arg(long, value_name = "PATTERNS", value_parser = NameFilter::parse_list)]
+    groups: Option<NameFilter>,
+
     /// Run against a built-in fake cluster; no broker needed
     #[arg(long, conflicts_with_all = ["profile", "bootstrap", "schema_registry"])]
     demo: bool,
@@ -57,24 +66,23 @@ async fn main() -> Result<()> {
     kaffy_ui::theme::init(theme);
     let keymap = Keymap::with_overrides(&ui_config.keys).map_err(anyhow::Error::msg)?;
 
-    let (worker, state) = if args.demo {
+    let (worker, mut state) = if args.demo {
         // The demo cluster is fake, so it accepts writes: try produce, replay and resets.
-        (
-            kaffy_kafka::spawn_demo(),
-            AppState::new("demo", false, false),
-        )
+        let mut state = AppState::new("demo", false, false);
+        state.topic_scope = args.topics.clone().unwrap_or_default();
+        state.groups.scope = args.groups.clone().unwrap_or_default();
+        (kaffy_kafka::spawn_demo(), state)
     } else {
         let profile = resolve_profile(&args)?;
         tracing::info!(profile = %profile.name, bootstrap = %profile.bootstrap_servers, "connecting");
         let worker = kaffy_kafka::spawn(&profile)
             .with_context(|| format!("could not set up profile `{}`", profile.name))?;
-        (
-            worker,
-            AppState::new(&profile.name, profile.read_only, profile.prod),
-        )
+        let mut state = AppState::new(&profile.name, profile.read_only, profile.prod);
+        state.topic_scope = profile.topics.clone();
+        state.groups.scope = profile.groups.clone();
+        (worker, state)
     };
 
-    let mut state = state;
     state.keymap = keymap;
     let mut terminal = ratatui::init();
     let result = App::new(state, worker).run(&mut terminal).await;
@@ -113,6 +121,12 @@ fn pick_theme(args: &Args, config: &Config) -> Result<ThemeName> {
 
 fn resolve_profile(args: &Args) -> Result<Profile> {
     let mut profile = load_profile(args)?;
+    if let Some(topics) = &args.topics {
+        profile.topics = topics.clone();
+    }
+    if let Some(groups) = &args.groups {
+        profile.groups = groups.clone();
+    }
     if let Some(url) = &args.schema_registry {
         profile.schema_registry = Some(SchemaRegistry {
             url: url.clone(),

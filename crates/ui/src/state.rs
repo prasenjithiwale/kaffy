@@ -7,6 +7,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+use kaffy_config::NameFilter;
 use kaffy_kafka::{
     Command, ConfigEntry, ConfigSource, Event, NewTopic, Operation, ProduceRequest, Record,
     RecordFilter, ReplayEnd, ResetTarget, StartAt, TopicInfo,
@@ -458,6 +459,8 @@ pub struct AppState {
     pub connection: Connection,
     pub topics: Option<Vec<TopicInfo>>,
     pub topic_filter: String,
+    /// The profile's `topics` patterns; other topics are never shown.
+    pub topic_scope: NameFilter,
     pub topic_table: TableState,
     pub tail: Option<TailView>,
     pub detail: Option<DetailView>,
@@ -490,6 +493,7 @@ impl AppState {
             connection: Connection::Connecting,
             topics: None,
             topic_filter: String::new(),
+            topic_scope: NameFilter::default(),
             topic_table: TableState::default().with_selected(0),
             tail: None,
             detail: None,
@@ -541,8 +545,12 @@ impl AppState {
     /// Applies a worker event; some ask for a follow-up request.
     pub fn on_event(&mut self, event: Event) -> Option<Effect> {
         match event {
-            Event::Metadata { brokers, topics } => {
+            Event::Metadata {
+                brokers,
+                mut topics,
+            } => {
                 self.connection = Connection::Connected { brokers };
+                topics.retain(|t| self.topic_scope.matches(&t.name));
                 self.topics = Some(topics);
                 self.clamp_topic_selection();
             }
@@ -566,7 +574,8 @@ impl AppState {
                     tail.push(*record);
                 }
             }
-            Event::Groups(list) => {
+            Event::Groups(mut list) => {
+                list.retain(|g| self.groups.scope.matches(&g.name));
                 for group in &list {
                     if let Some(lag) = group.lag {
                         self.groups.record_lag(&group.name, lag);
@@ -668,7 +677,13 @@ impl AppState {
             Event::Error(message) => self.flash_error(message),
             Event::TopicCreated { name } => {
                 self.close_pending(Operation::CreateTopic);
-                self.flash_info(format!("created topic {name}"));
+                if self.topic_scope.matches(&name) {
+                    self.flash_info(format!("created topic {name}"));
+                } else {
+                    self.flash_info(format!(
+                        "created topic {name}; it is hidden by this profile's topics patterns"
+                    ));
+                }
                 return Some(Effect::Kafka(Command::ListTopics));
             }
             Event::TopicDeleted { name } => {
@@ -2321,6 +2336,47 @@ mod tests {
             }
             other => panic!("expected a tail command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn profile_scope_hides_topics_and_groups_everywhere() {
+        let mut state = AppState::new("test", true, false);
+        state.topic_scope = NameFilter::parse_list("orders*,!*.dlq").unwrap();
+        state.groups.scope = NameFilter::parse_list("checkout-*").unwrap();
+        state.on_event(Event::Metadata {
+            brokers: 1,
+            topics: vec![topic("orders"), topic("orders.dlq"), topic("payments")],
+        });
+        let names: Vec<&str> = state
+            .visible_topics()
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
+        assert_eq!(names, ["orders"]);
+
+        let group = |name: &str| kaffy_kafka::GroupSummary {
+            name: name.into(),
+            state: kaffy_kafka::GroupState::Empty,
+            members: 0,
+            topics: vec!["orders".into()],
+            lag: Some(1),
+        };
+        state.on_event(Event::Groups(vec![group("checkout-api"), group("billing")]));
+        let names: Vec<&str> = state
+            .groups
+            .visible()
+            .iter()
+            .map(|g| g.name.as_str())
+            .collect();
+        assert_eq!(names, ["checkout-api"]);
+        assert!(!state.groups.history.contains_key("billing"));
+
+        // The palette only offers what the scope lets through.
+        for hidden in ["payments", "billing"] {
+            let found = palette::matches(&state, hidden);
+            assert!(found.iter().all(|m| m.entry.text() != hidden), "{hidden}");
+        }
+        assert!(!palette::matches(&state, "checkout-api").is_empty());
     }
 
     #[test]

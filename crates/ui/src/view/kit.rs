@@ -33,6 +33,15 @@ pub fn counted(title: impl Into<String>, count: usize) -> Block<'static> {
         ]))
 }
 
+/// The profile's scope (`topics` / `groups` patterns), next to a list's title.
+pub fn scope_note(scope: &kaffy_config::NameFilter) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("only ", theme::faint()),
+        Span::styled(scope.to_string(), theme::accent()),
+        Span::raw(" "),
+    ])
+}
+
 /// Text for the right-hand side of a panel's top border.
 pub fn note(text: impl Into<String>, style: Style) -> Line<'static> {
     Line::styled(format!(" {} ", text.into()), style).right_aligned()

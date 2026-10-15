@@ -13,6 +13,9 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut AppState) {
     let total = state.topics.as_ref().map_or(0, Vec::len);
 
     let mut block = kit::counted("Topics", total);
+    if !state.topic_scope.is_empty() {
+        block = block.title(kit::scope_note(&state.topic_scope));
+    }
     if !state.topic_filter.is_empty() {
         block = block.title(kit::filter_note(&state.topic_filter, visible.len()));
     }
@@ -22,6 +25,9 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut AppState) {
         frame.render_widget(block, area);
         let text = match &state.topics {
             None => "◌ Loading topics…",
+            Some(t) if t.is_empty() && !state.topic_scope.is_empty() => {
+                "No topics match this profile's topics patterns"
+            }
             Some(t) if t.is_empty() => "The cluster has no topics yet · n creates one",
             Some(_) => "No topics match the filter · esc clears it",
         };

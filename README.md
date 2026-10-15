@@ -24,6 +24,8 @@ write shows a preview and waits for you to confirm. One static binary for Linux 
   health and every offline or under-replicated partition.
 - **Clusters:** plaintext, SSL/mTLS, SASL (PLAIN, SCRAM), Confluent Cloud and Amazon MSK with IAM. Passwords
   come from environment variables, never the config file.
+- **Focus:** show only the topics and groups you care about on a shared cluster, per profile or with
+  `--topics` / `--groups`.
 - **Comfort:** a fuzzy command palette (`:`), rebindable keys, dark, light and terminal-color themes, and
   `kaffy --demo`, a fake cluster with live data to try everything on.
 
@@ -84,6 +86,7 @@ kaffy --demo                                  # fake cluster with live data, no 
 kaffy --bootstrap localhost:9092              # plaintext broker, no config file
 kaffy --bootstrap localhost:9092 --schema-registry http://localhost:8081
 kaffy --profile staging                       # a profile from ~/.config/kaffy/config.toml
+kaffy --profile staging --topics 'checkout-*' --groups 'checkout-*'   # only what you work on
 ```
 
 Press `?` on any screen for its keys, and `1`–`4` to switch between topics, consumer groups, schemas and
@@ -125,6 +128,25 @@ profile it uses the `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION
 (`DescribeTopic`, `ReadData`, `DescribeGroup`, …) and, for writes, the matching write actions.
 
 TLS uses the system's CA certificates, so neither needs `[tls]`.
+
+### Showing only some topics and groups
+
+On a shared cluster, a profile can list the topics and consumer groups to show:
+
+```toml
+[profiles.staging]
+topics = ["checkout-*", "payments", "!*.dlq"]   # globs: * any run of characters, ? one character
+groups = ["checkout-*"]                          # a leading ! excludes; only excludes = all but those
+```
+
+`--topics 'checkout-*,!*.dlq'` and `--groups '…'` set them for one run (and override the profile's). Everything
+else is hidden from the topics and groups tabs and the command palette. The active
+patterns are shown next to the list title. Groups outside the patterns are skipped before their lag is
+fetched, which also makes the groups tab faster on large clusters. Patterns are case-sensitive, like Kafka names.
+
+This narrows what you see; it is not access control. The brokers tab still reports every partition, a group's
+detail still lists all the topics it consumes, and anyone can run kaffy without the patterns. Use Kafka ACLs to
+restrict access.
 
 ### Schema Registry
 

@@ -3,6 +3,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
+use kaffy_config::NameFilter;
 use kaffy_kafka::{GroupDetail, GroupSummary};
 use ratatui::widgets::TableState;
 
@@ -16,6 +17,8 @@ pub struct GroupsView {
     pub list: Option<Vec<GroupSummary>>,
     pub table: TableState,
     pub filter: String,
+    /// The profile's `groups` patterns; other groups are never shown.
+    pub scope: NameFilter,
     /// Total lag samples per group, oldest first.
     pub history: HashMap<String, VecDeque<i64>>,
     /// When the last refresh was requested; `None` sends one right away.

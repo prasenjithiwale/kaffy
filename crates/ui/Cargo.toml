@@ -10,6 +10,7 @@ homepage.workspace = true
 documentation = "https://github.com/prasenjithiwale/kaffy"
 
 [dependencies]
+kaffy-config.workspace = true
 kaffy-kafka.workspace = true
 kaffy-schema.workspace = true
 chrono.workspace = true

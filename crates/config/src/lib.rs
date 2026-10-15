@@ -105,6 +105,93 @@ pub struct Profile {
     /// `.proto` files to decode them with.
     #[serde(default)]
     pub protobuf: Vec<ProtobufTopic>,
+    /// Shows only the topics matching these patterns (see [`NameFilter`]).
+    #[serde(default, deserialize_with = "name_filter")]
+    pub topics: NameFilter,
+    /// Shows only the consumer groups matching these patterns.
+    #[serde(default, deserialize_with = "name_filter")]
+    pub groups: NameFilter,
+}
+
+fn name_filter<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<NameFilter, D::Error> {
+    let patterns = Vec::<String>::deserialize(deserializer)?;
+    NameFilter::new(&patterns).map_err(serde::de::Error::custom)
+}
+
+/// Which topic or group names to show: glob patterns where `*` matches any
+/// run of characters and `?` one character. A leading `!` excludes. With no
+/// plain patterns everything is shown except the excluded names.
+///
+/// This narrows what kaffy shows; it is not access control (use Kafka ACLs).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NameFilter {
+    include: Vec<String>,
+    exclude: Vec<String>,
+}
+
+impl NameFilter {
+    pub fn new(patterns: &[impl AsRef<str>]) -> Result<Self, String> {
+        let mut filter = Self::default();
+        for pattern in patterns {
+            let pattern = pattern.as_ref().trim();
+            match pattern.strip_prefix('!') {
+                Some("") => return Err("`!` needs a pattern after it".to_owned()),
+                Some(excluded) => filter.exclude.push(excluded.to_owned()),
+                None if pattern.is_empty() => return Err("empty pattern".to_owned()),
+                None => filter.include.push(pattern.to_owned()),
+            }
+        }
+        Ok(filter)
+    }
+
+    /// `orders-*, payments, !*.dlq`, as `--topics` takes it.
+    pub fn parse_list(list: &str) -> Result<Self, String> {
+        let patterns: Vec<&str> = list.split(',').map(str::trim).collect();
+        Self::new(&patterns)
+    }
+
+    /// True when the filter lets every name through.
+    pub fn is_empty(&self) -> bool {
+        self.include.is_empty() && self.exclude.is_empty()
+    }
+
+    pub fn matches(&self, name: &str) -> bool {
+        (self.include.is_empty() || self.include.iter().any(|p| glob(p, name)))
+            && !self.exclude.iter().any(|p| glob(p, name))
+    }
+}
+
+impl std::fmt::Display for NameFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let excluded = self.exclude.iter().map(|p| format!("!{p}"));
+        let all: Vec<String> = self.include.iter().cloned().chain(excluded).collect();
+        f.write_str(&all.join(", "))
+    }
+}
+
+/// Case-sensitive, like Kafka names. `*` backtracks to the last star only,
+/// which is enough for globs and stays linear in practice.
+fn glob(pattern: &str, name: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let n: Vec<char> = name.chars().collect();
+    let (mut pi, mut ni) = (0, 0);
+    let mut star: Option<(usize, usize)> = None;
+    while ni < n.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == n[ni]) {
+            pi += 1;
+            ni += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some((pi, ni));
+            pi += 1;
+        } else if let Some((sp, sn)) = star {
+            pi = sp + 1;
+            ni = sn + 1;
+            star = Some((sp, sn + 1));
+        } else {
+            return false;
+        }
+    }
+    p[pi..].iter().all(|&c| c == '*')
 }
 
 /// Amazon MSK IAM: SASL/OAUTHBEARER with tokens signed by AWS credentials.
@@ -291,6 +378,8 @@ impl Profile {
             schema_registry: None,
             librdkafka: BTreeMap::new(),
             protobuf: Vec::new(),
+            topics: NameFilter::default(),
+            groups: NameFilter::default(),
         }
     }
 
@@ -592,5 +681,56 @@ value = "acme.Order"
     fn rejects_unknown_keys() {
         let err = Config::from_toml_str("[profiles.x]\nbootstrap_servers = \"b\"\ntypo = 1\n");
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn globs() {
+        assert!(glob("orders", "orders"));
+        assert!(!glob("orders", "orders-v2"));
+        assert!(glob("orders*", "orders-v2"));
+        assert!(glob("*.dlq", "payments.dlq"));
+        assert!(!glob("*.dlq", "payments.dlq.old"));
+        assert!(glob("a*b*c", "a-x-b-y-b-c"));
+        assert!(glob("team-?-*", "team-a-orders"));
+        assert!(!glob("team-?-*", "team-ab-orders"));
+        assert!(glob("*", ""));
+        assert!(!glob("Orders", "orders"), "case-sensitive like Kafka");
+    }
+
+    #[test]
+    fn name_filter_includes_then_excludes() {
+        let filter = NameFilter::parse_list("orders-*, payments, !*.dlq").unwrap();
+        assert!(filter.matches("orders-eu"));
+        assert!(filter.matches("payments"));
+        assert!(!filter.matches("orders-eu.dlq"));
+        assert!(!filter.matches("users"));
+        assert_eq!(filter.to_string(), "orders-*, payments, !*.dlq");
+
+        let only_excludes = NameFilter::parse_list("!__*").unwrap();
+        assert!(only_excludes.matches("orders"));
+        assert!(!only_excludes.matches("__consumer_offsets"));
+
+        assert!(NameFilter::default().matches("anything"));
+        assert!(NameFilter::default().is_empty());
+        assert!(NameFilter::parse_list("orders,").is_err());
+        assert!(NameFilter::parse_list("!").is_err());
+    }
+
+    #[test]
+    fn profile_filters_from_toml() {
+        let config = Config::from_toml_str(
+            "[profiles.x]\nbootstrap_servers = \"b\"\n\
+             topics = [\"orders-*\", \"!*.dlq\"]\ngroups = [\"checkout-*\"]\n",
+        )
+        .unwrap();
+        let profile = config.profile(None).unwrap();
+        assert!(profile.topics.matches("orders-eu"));
+        assert!(!profile.topics.matches("orders-eu.dlq"));
+        assert!(profile.groups.matches("checkout-api"));
+        assert!(!profile.groups.matches("billing"));
+
+        let bad =
+            Config::from_toml_str("[profiles.x]\nbootstrap_servers = \"b\"\ntopics = [\"\"]\n");
+        assert!(bad.is_err());
     }
 }

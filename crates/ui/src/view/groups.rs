@@ -23,6 +23,9 @@ pub fn render_list(frame: &mut Frame, area: Rect, state: &mut AppState) {
         format!("↻ every {}s", REFRESH_EVERY.as_secs()),
         theme::faint(),
     ));
+    if !view.scope.is_empty() {
+        block = block.title(kit::scope_note(&view.scope));
+    }
     if !view.filter.is_empty() {
         block = block.title(kit::filter_note(&view.filter, visible.len()));
     }
@@ -31,6 +34,9 @@ pub fn render_list(frame: &mut Frame, area: Rect, state: &mut AppState) {
         frame.render_widget(block, area);
         let text = match &view.list {
             None => "◌ Loading consumer groups…",
+            Some(l) if l.is_empty() && !view.scope.is_empty() => {
+                "No consumer groups match this profile's groups patterns"
+            }
             Some(l) if l.is_empty() => "The cluster has no consumer groups yet",
             Some(_) => "No groups match the filter · esc clears it",
         };

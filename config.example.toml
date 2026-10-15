@@ -24,6 +24,10 @@ security_protocol = "sasl_ssl"          # plaintext | ssl | sasl_plaintext | sas
 sasl = { mechanism = "SCRAM-SHA-512", username = "svc-kaffy", password_env = "KAFFY_STAGING_PASSWORD" }
 tls = { ca_location = "/etc/ssl/certs/staging-ca.pem" }
 schema_registry = { url = "https://schema-registry.staging:8081", username = "sr-key", password_env = "KAFFY_STAGING_SR_SECRET" }
+# Show only your team's topics and groups: globs (* and ?), a leading ! excludes. --topics / --groups
+# override them for one run. This narrows the view; it is not access control (use Kafka ACLs for that).
+topics = ["checkout-*", "payments", "!*.dlq"]
+groups = ["checkout-*"]
 
 [profiles.prod-mtls]
 bootstrap_servers = "broker-1.prod:9093"
