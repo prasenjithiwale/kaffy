@@ -19,6 +19,17 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut AppState) {
 
     let status = if tail.paused {
         Span::styled(" ❚❚ PAUSED ", theme::warning().add_modifier(Modifier::BOLD))
+    } else if tail.waiting > 0 {
+        // A paged tail stopped with more to read: say how to get it.
+        let key = state
+            .keymap
+            .keys("pause")
+            .first()
+            .map_or_else(|| "space".to_owned(), ToString::to_string);
+        Span::styled(
+            format!(" ▤ PAGE · {key} next page "),
+            theme::warning().add_modifier(Modifier::BOLD),
+        )
     } else if tail.follow {
         Span::styled(" ● LIVE ", theme::ok().add_modifier(Modifier::BOLD))
     } else {

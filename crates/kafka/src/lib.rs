@@ -58,10 +58,16 @@ pub enum Command {
         session: u64,
         topic: String,
         start: StartAt,
+        /// Read about this many records, split evenly across the partitions,
+        /// then pause each partition until [`Command::NextPage`]; see
+        /// [`Event::TailPage`]. `None` keeps reading.
+        page: Option<usize>,
     },
     StopTail,
     Pause,
     Resume,
+    /// Read the next page of a paged tail.
+    NextPage,
     /// Consumer groups with their total lag; answered with [`Event::Groups`].
     ListGroups,
     /// Per-partition lag and members; answered with [`Event::GroupDetail`].
@@ -246,6 +252,13 @@ pub enum ReplayEnd {
     Timestamp(i64),
 }
 
+impl StartAt {
+    /// Starts that look back at older messages, as opposed to following new ones.
+    pub fn reads_history(self) -> bool {
+        matches!(self, Self::Beginning | Self::Offset(_) | Self::Timestamp(_))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionOffset {
     pub topic: String,
@@ -337,6 +350,12 @@ pub enum Event {
         session: u64,
         /// Boxed: records are much larger than the other events.
         record: Box<Record>,
+    },
+    /// A paged tail paused partitions that have read their share of the page
+    /// and hold more; `waiting` is how many so far.
+    TailPage {
+        session: u64,
+        waiting: usize,
     },
     Groups(Vec<GroupSummary>),
     GroupDetail(GroupDetail),

@@ -1,3 +1,4 @@
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -259,6 +260,7 @@ async fn run(ctx: Context, mut commands: mpsc::UnboundedReceiver<Command>) {
                 session,
                 topic,
                 start,
+                page,
             } => {
                 if let Some(old) = tail.take() {
                     old.task.abort();
@@ -270,7 +272,7 @@ async fn run(ctx: Context, mut commands: mpsc::UnboundedReceiver<Command>) {
                     ctx.decoders.clone(),
                     session,
                     topic,
-                    start,
+                    TailStart { at: start, page },
                     control_rx,
                     ctx.events.clone(),
                 ));
@@ -281,7 +283,7 @@ async fn run(ctx: Context, mut commands: mpsc::UnboundedReceiver<Command>) {
                     old.task.abort();
                 }
             }
-            Command::Pause | Command::Resume => {
+            Command::Pause | Command::Resume | Command::NextPage => {
                 if let Some(tail) = &tail {
                     let _ = tail.control.send(command);
                 }
@@ -689,6 +691,12 @@ fn topic_infos(metadata: &Metadata) -> Vec<TopicInfo> {
     topics
 }
 
+/// Where a tail starts, and how much it reads before pausing.
+struct TailStart {
+    at: StartAt,
+    page: Option<usize>,
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_tail(
     config: ClientConfig,
@@ -696,7 +704,7 @@ async fn run_tail(
     decoders: Decoders,
     session: u64,
     topic: String,
-    start: StartAt,
+    start: TailStart,
     control: mpsc::UnboundedReceiver<Command>,
     events: mpsc::Sender<Event>,
 ) {
@@ -718,7 +726,7 @@ async fn tail(
     decoders: Decoders,
     session: u64,
     topic: &str,
-    start: StartAt,
+    start: TailStart,
     mut control: mpsc::UnboundedReceiver<Command>,
     events: &mpsc::Sender<Event>,
 ) -> KafkaResult<()> {
@@ -727,7 +735,7 @@ async fn tail(
     let partitions = {
         let consumer = consumer.clone();
         let topic = topic.to_owned();
-        tokio::task::spawn_blocking(move || assign(&consumer, &topic, start))
+        tokio::task::spawn_blocking(move || assign(&consumer, &topic, start.at))
             .await
             .expect("assign task panicked")?
     };
@@ -742,6 +750,22 @@ async fn tail(
         return Ok(());
     }
 
+    // A paged tail gives each partition an equal share of the page, so one
+    // busy partition can't fill it, and pauses a partition once it has read
+    // its share. Records already on their way still arrive, which the page's
+    // headroom absorbs.
+    let share = start.page.map(|page| (page / partitions.max(1)).max(1));
+    let mut read: HashMap<i32, usize> = HashMap::new();
+    let mut waiting: BTreeSet<i32> = BTreeSet::new();
+    let mut paused = false;
+    let only = |partitions: &BTreeSet<i32>| -> KafkaResult<TopicPartitionList> {
+        let mut tpl = TopicPartitionList::new();
+        for &p in partitions {
+            tpl.add_partition(topic, p);
+        }
+        Ok(tpl)
+    };
+
     let mut stream = consumer.stream();
     loop {
         tokio::select! {
@@ -749,6 +773,7 @@ async fn tail(
                 Some(Ok(message)) => {
                     let mut record = to_record(&message);
                     drop(message);
+                    let partition = record.partition;
                     if decoders.is_active() {
                         decoders.decode(&mut record).await;
                     }
@@ -759,6 +784,17 @@ async fn tail(
                     if events.send(event).await.is_err() {
                         return Ok(());
                     }
+                    if let Some(share) = share {
+                        let count = read.entry(partition).or_default();
+                        *count += 1;
+                        if *count >= share && waiting.insert(partition) {
+                            consumer.pause(&only(&BTreeSet::from([partition]))?)?;
+                            let event = Event::TailPage { session, waiting: waiting.len() };
+                            if events.send(event).await.is_err() {
+                                return Ok(());
+                            }
+                        }
+                    }
                 }
                 Some(Err(e)) => {
                     tracing::warn!(%topic, error = %e, "consume error");
@@ -767,8 +803,28 @@ async fn tail(
                 None => return Ok(()),
             },
             command = control.recv() => match command {
-                Some(Command::Pause) => consumer.pause(&consumer.assignment()?)?,
-                Some(Command::Resume) => consumer.resume(&consumer.assignment()?)?,
+                Some(Command::Pause) => {
+                    paused = true;
+                    consumer.pause(&consumer.assignment()?)?;
+                }
+                // Partitions waiting for the next page stay paused.
+                Some(Command::Resume) => {
+                    paused = false;
+                    let all: BTreeSet<i32> = consumer
+                        .assignment()?
+                        .elements()
+                        .iter()
+                        .map(|e| e.partition())
+                        .collect();
+                    consumer.resume(&only(&all.difference(&waiting).copied().collect())?)?;
+                }
+                Some(Command::NextPage) => {
+                    read.clear();
+                    let next = std::mem::take(&mut waiting);
+                    if !paused {
+                        consumer.resume(&only(&next)?)?;
+                    }
+                }
                 Some(_) => {}
                 None => return Ok(()),
             },

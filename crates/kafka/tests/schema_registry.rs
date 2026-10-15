@@ -107,6 +107,7 @@ async fn first_record(worker: &mut Worker, topic: &str) -> Record {
             session: 1,
             topic: topic.to_owned(),
             start: StartAt::Beginning,
+            page: None,
         })
         .unwrap();
     loop {

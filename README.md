@@ -51,7 +51,7 @@ Things kaffy doesn't do yet, so you know before you try:
 - **Kafka only, plus Schema Registry:** no Kafka Connect, ksqlDB, ACLs or quotas, and no Confluent Cloud or
   MSK management APIs (environments, API keys, cluster settings).
 - **Messages are held in memory:** up to 5,000 per topic view, starting from the last 100 per partition by
-  default. Use seek and the filter to reach older data; export writes the messages loaded and shown.
+  default. Older data is read a page at a time (see below); export writes the messages loaded and shown.
 - **Payload formats:** JSON, text, Avro, JSON Schema and Protobuf; anything else is shown as a hex dump.
 
 ## Install
@@ -214,7 +214,7 @@ quit = []                    # unbound; ctrl-c always quits
 |---|---|
 | everywhere | `↑↓`/`jk` move, `PgUp`/`PgDn`/`Ctrl-u`/`Ctrl-d` page, `g`/`G` top/bottom, `esc` back (clears an active filter first), `?` help, `q`/`Ctrl-c` quit |
 | topics | `⏎` open, `/` filter, `r` refresh, `c` config, `n` new topic, `D` delete topic, `T` delete records |
-| messages | `⏎` detail, `space` pause/resume, `/` filter (see below), `b` from beginning, `e` from end, `o` seek to offset, `t` seek to time (`-15m`, `2026-10-13 09:30`, RFC 3339, epoch ms), `r` reload, `y`/`Y` copy value/key, `p` produce, `E` edit & produce, `K` tombstone, `X` replay, `x` export |
+| messages | `⏎` detail, `space` pause/resume (next page when paged), `/` filter (see below), `b` from beginning, `e` from end, `o` seek to offset, `t` seek to time (`-15m`, `2026-10-13 09:30`, RFC 3339, epoch ms), `r` reload, `y`/`Y` copy value/key, `p` produce, `E` edit & produce, `K` tombstone, `X` replay, `x` export |
 | detail | `↑↓` scroll, `y`/`Y` copy value/key, `E` edit & produce, `K` tombstone |
 | topic config | `⏎` change a value, `u` reset to the inherited value |
 | schemas | `⏎` open, `n` new subject, `/` filter |
@@ -241,6 +241,11 @@ Wrap a whole term in quotes to include spaces: `"key:a b"`. Quotes elsewhere are
 so `~"status":"(PAID|SHIPPED)"` works as typed.
 
 Opening a topic reads the last 100 messages of each partition, then follows new ones. Up to 5,000 messages are kept in memory.
+
+Looking back (`b` from the beginning, `o` an offset, `t` a time) reads one page of 4,500 messages, split
+evenly across the partitions so each one starts where you asked, and stops; the status shows `PAGE`.
+`space` replaces it with the next page, carrying on where each partition stopped. `e` goes back to
+following new messages.
 The viewer assigns partitions directly and never commits offsets, so it does not join or disturb any consumer group.
 
 ## Consumer groups

@@ -77,10 +77,12 @@ async fn run(mut commands: mpsc::UnboundedReceiver<Command>, events: mpsc::Sende
                 };
                 let _ = events.send(Event::Cluster(cluster)).await;
             }
+            // Demo partitions hold fewer records than a page, so paging never kicks in.
             Command::Tail {
                 session,
                 topic,
                 start,
+                page: _,
             } => {
                 if let Some((_, task)) = tail.take() {
                     task.abort();
@@ -126,6 +128,7 @@ async fn run(mut commands: mpsc::UnboundedReceiver<Command>, events: mpsc::Sende
                     task.abort();
                 }
             }
+            Command::NextPage => {}
             Command::Pause | Command::Resume => {
                 if let Some((control, _)) = &tail {
                     let _ = control.send(command);
@@ -598,6 +601,7 @@ mod tests {
                 session: 7,
                 topic: "orders".to_owned(),
                 start: StartAt::LastN(2),
+                page: None,
             })
             .unwrap();
         let Some(Event::TailStarted {

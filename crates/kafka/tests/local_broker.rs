@@ -154,6 +154,7 @@ async fn tail(worker: &mut Worker, topic: &str, start: StartAt, count: usize) ->
             session: 1,
             topic: topic.to_owned(),
             start,
+            page: None,
         })
         .unwrap();
     let mut records = Vec::new();
@@ -226,6 +227,102 @@ async fn offset_seek_is_clamped_per_partition() {
     let records = tail(&mut worker, &topic.name, StartAt::Offset(2), 2).await;
     let positions: Vec<_> = records.iter().map(|r| (r.partition, r.offset)).collect();
     assert_eq!(positions, vec![(0, 2), (0, 3)]);
+}
+
+#[tokio::test]
+#[ignore = "needs a Kafka broker"]
+async fn paged_tail_reads_each_partition_from_the_start() {
+    let topic = TestTopic::create().await;
+    let producer: FutureProducer = ClientConfig::new()
+        .set("bootstrap.servers", bootstrap())
+        .set("linger.ms", "5")
+        .create()
+        .unwrap();
+    let sends = (0..600).map(|i| {
+        let producer = producer.clone();
+        let topic = topic.name.clone();
+        async move {
+            let payload = format!("m{i}");
+            producer
+                .send(
+                    FutureRecord::<str, _>::to(&topic)
+                        .partition(i % 2)
+                        .payload(&payload),
+                    TIMEOUT,
+                )
+                .await
+                .map_err(|(e, _)| e)
+                .unwrap();
+        }
+    });
+    futures::future::join_all(sends).await;
+
+    // A page of 100 is 50 per partition: both partitions start at offset 0,
+    // and neither runs past its share by more than what was in flight.
+    let mut worker = kaffy_kafka::spawn(&Profile::adhoc(bootstrap())).unwrap();
+    worker
+        .commands
+        .send(Command::Tail {
+            session: 1,
+            topic: topic.name.clone(),
+            start: StartAt::Beginning,
+            page: Some(100),
+        })
+        .unwrap();
+    let mut page = Vec::new();
+    let mut waiting = 0;
+    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    let mut quiet_until = None;
+    loop {
+        match tokio::time::timeout_at(quiet_until.unwrap_or(deadline), worker.events.recv()).await {
+            Ok(Some(Event::Record { record, .. })) => page.push(*record),
+            Ok(Some(Event::TailPage { waiting: w, .. })) => {
+                waiting = w;
+                if w == 2 {
+                    quiet_until = Some(tokio::time::Instant::now() + Duration::from_secs(2));
+                }
+            }
+            Ok(Some(Event::Error(e))) => panic!("worker error: {e}"),
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("worker stopped"),
+            Err(_) => break,
+        }
+    }
+    assert_eq!(waiting, 2, "both partitions have more than their share");
+    let last = |records: &[Record], p: i32| {
+        let offsets: Vec<i64> = records
+            .iter()
+            .filter(|r| r.partition == p)
+            .map(|r| r.offset)
+            .collect();
+        assert_eq!(offsets.first(), Some(&0), "partition {p} starts at 0");
+        assert!(
+            offsets.windows(2).all(|w| w[1] == w[0] + 1),
+            "partition {p} has no gaps"
+        );
+        assert!(
+            (50..80).contains(&offsets.len()),
+            "partition {p} read {} records",
+            offsets.len()
+        );
+        *offsets.last().unwrap()
+    };
+    let ends = [last(&page, 0), last(&page, 1)];
+
+    // The next page carries on where each partition stopped.
+    worker.commands.send(Command::NextPage).unwrap();
+    let mut next = Vec::new();
+    let quiet = Duration::from_secs(2);
+    while let Ok(Some(event)) = tokio::time::timeout(quiet, worker.events.recv()).await {
+        if let Event::Record { record, .. } = event {
+            next.push(*record);
+        }
+    }
+    for p in [0, 1] {
+        let first = next.iter().find(|r| r.partition == p).map(|r| r.offset);
+        assert_eq!(first, Some(ends[p as usize] + 1), "partition {p} continues");
+    }
+    worker.commands.send(Command::StopTail).unwrap();
 }
 
 // ---- Phase 2: consumer groups, offset resets, produce, replay ----

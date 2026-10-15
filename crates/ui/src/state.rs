@@ -27,6 +27,10 @@ use crate::{fmt, template};
 
 /// Records kept per tail; older ones are dropped.
 pub const BUFFER_CAPACITY: usize = 5_000;
+/// Records read per page when looking back (from the start, an offset or a
+/// time). Smaller than the buffer, so records still in flight when the
+/// partitions pause don't push the page's first rows out.
+pub const PAGE_SIZE: usize = BUFFER_CAPACITY * 9 / 10;
 /// Where a tail starts when a topic is opened.
 pub const DEFAULT_START: StartAt = StartAt::LastN(100);
 /// Characters kept for the table previews.
@@ -322,6 +326,9 @@ pub struct TailView {
     pub rows: VecDeque<Row>,
     pub received: u64,
     pub paused: bool,
+    /// Partitions of a paged tail that read their share and hold more;
+    /// `space` reads the next page.
+    pub waiting: usize,
     /// The filter as typed; see [`crate::filter`] for the syntax.
     pub filter: String,
     compiled: Result<Filter, String>,
@@ -343,6 +350,7 @@ impl TailView {
             rows: VecDeque::new(),
             received: 0,
             paused: false,
+            waiting: 0,
             filter: String::new(),
             compiled: Ok(Filter::default()),
             follow: true,
@@ -573,6 +581,11 @@ impl AppState {
             Event::Record { session, record } => {
                 if let Some(tail) = self.tail.as_mut().filter(|t| t.session == session) {
                     tail.push(*record);
+                }
+            }
+            Event::TailPage { session, waiting } => {
+                if let Some(tail) = self.tail.as_mut().filter(|t| t.session == session) {
+                    tail.waiting = waiting;
                 }
             }
             Event::Groups(mut list) => {
@@ -1862,6 +1875,16 @@ impl AppState {
                 self.screen = Screen::Topics;
                 return Some(Effect::Kafka(Command::StopTail));
             }
+            Action::TogglePause if !tail.paused && tail.waiting > 0 => {
+                tail.waiting = 0;
+                // Pages replace each other, and the new one is read from its top.
+                tail.rows.clear();
+                tail.scroll = 0;
+                tail.follow = false;
+                tail.selected = None;
+                self.flash_info("reading the next page");
+                return Some(Effect::Kafka(Command::NextPage));
+            }
             Action::TogglePause => {
                 tail.paused = !tail.paused;
                 let command = if tail.paused {
@@ -2192,6 +2215,7 @@ impl AppState {
             session,
             topic,
             start,
+            page: start.reads_history().then_some(PAGE_SIZE),
         })
     }
 
@@ -2469,6 +2493,80 @@ mod tests {
                 .record
                 .offset,
             5
+        );
+    }
+
+    #[test]
+    fn looking_back_reads_a_page_live_starts_do_not() {
+        let mut state = with_topics();
+        let Some(Effect::Kafka(Command::Tail { page, .. })) = state.update(Action::Open) else {
+            panic!("expected a tail");
+        };
+        assert_eq!(page, None, "the default start follows new messages");
+        for (start, expected) in [
+            (StartAt::Beginning, Some(PAGE_SIZE)),
+            (StartAt::Offset(1000), Some(PAGE_SIZE)),
+            (StartAt::Timestamp(0), Some(PAGE_SIZE)),
+            (StartAt::End, None),
+        ] {
+            let Some(Effect::Kafka(Command::Tail { page, .. })) = state.update(Action::Seek(start))
+            else {
+                panic!("expected a tail for {start:?}");
+            };
+            assert_eq!(page, expected, "{start:?}");
+        }
+    }
+
+    #[test]
+    fn space_reads_the_next_page_once_partitions_wait() {
+        let mut state = with_topics();
+        state.update(Action::Open);
+        let Some(Effect::Kafka(Command::Tail { session, .. })) =
+            state.update(Action::Seek(StartAt::Beginning))
+        else {
+            panic!("expected a tail");
+        };
+        for i in 0..3 {
+            state.on_event(Event::Record {
+                session,
+                record: Box::new(record(i, "x")),
+            });
+        }
+        state.on_event(Event::TailPage {
+            session,
+            waiting: 2,
+        });
+        assert_eq!(state.tail.as_ref().unwrap().waiting, 2);
+        // Stale sessions don't touch the current tail.
+        state.on_event(Event::TailPage {
+            session: session + 99,
+            waiting: 0,
+        });
+        assert_eq!(state.tail.as_ref().unwrap().waiting, 2);
+
+        assert_eq!(
+            state.update(Action::TogglePause),
+            Some(Effect::Kafka(Command::NextPage))
+        );
+        let tail = state.tail.as_ref().unwrap();
+        assert_eq!(tail.waiting, 0);
+        assert!(tail.rows.is_empty(), "the next page replaces this one");
+        assert!(!tail.follow, "a page is read from its top");
+        assert_eq!(tail.received, 3);
+
+        // With nothing waiting, space pauses as before; resuming resumes.
+        assert_eq!(
+            state.update(Action::TogglePause),
+            Some(Effect::Kafka(Command::Pause))
+        );
+        state.on_event(Event::TailPage {
+            session,
+            waiting: 1,
+        });
+        assert_eq!(
+            state.update(Action::TogglePause),
+            Some(Effect::Kafka(Command::Resume)),
+            "a user pause comes first"
         );
     }
 
