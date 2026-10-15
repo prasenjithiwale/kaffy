@@ -1387,7 +1387,7 @@ dependencies = [
 
 [[package]]
 name = "kaffy"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1406,7 +1406,7 @@ dependencies = [
 
 [[package]]
 name = "kaffy-config"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "dirs",
  "serde",
@@ -1416,7 +1416,7 @@ dependencies = [
 
 [[package]]
 name = "kaffy-kafka"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "apache-avro",
  "base64 0.22.1",
@@ -1437,7 +1437,7 @@ dependencies = [
 
 [[package]]
 name = "kaffy-schema"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "apache-avro",
  "prost-reflect",
@@ -1451,7 +1451,7 @@ dependencies = [
 
 [[package]]
 name = "kaffy-ui"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "kaffy-config",
