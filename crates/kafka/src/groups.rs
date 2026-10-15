@@ -2,7 +2,7 @@
 //! call them from `spawn_blocking`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use kaffy_config::NameFilter;
@@ -11,6 +11,7 @@ use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer};
 use rdkafka::error::{KafkaError, KafkaResult};
 use rdkafka::{Offset, TopicPartitionList};
 
+use crate::group_offsets::{committed_offsets, group_committed_offsets};
 use crate::msk_iam::Auth;
 use crate::{
     GroupDetail, GroupMember, GroupState, GroupSummary, PartitionLag, PartitionOffset, ResetPlan,
@@ -25,11 +26,8 @@ pub(crate) const EARLIEST: i64 = -2;
 
 pub(crate) struct Groups {
     base: ClientConfig,
-    /// Metadata, group list and watermark queries.
+    /// Metadata, group list, committed offsets and watermark queries.
     admin: Arc<BaseConsumer>,
-    /// One client per group, configured with that group.id to read and commit
-    /// its offsets. They never subscribe, so they never join the group.
-    clients: Mutex<HashMap<String, Arc<BaseConsumer>>>,
     auth: Auth,
     /// The profile's `groups` patterns: other groups are skipped before any
     /// offset lookups, which is where listing groups spends its time.
@@ -46,25 +44,29 @@ impl Groups {
         Self {
             base,
             admin,
-            clients: Mutex::new(HashMap::new()),
             auth,
             scope,
         }
     }
 
     pub(crate) fn list(&self) -> KafkaResult<Vec<GroupSummary>> {
-        let groups = self.admin.fetch_group_list(None, TIMEOUT)?;
-        let partitions = self.all_partitions()?;
+        let list = self.admin.fetch_group_list(None, TIMEOUT)?;
+        // Only consumer groups have offsets; skip Connect workers and the like.
+        let groups: Vec<_> = list
+            .groups()
+            .iter()
+            .filter(|g| {
+                matches!(g.protocol_type(), "consumer" | "") && self.scope.matches(g.name())
+            })
+            .collect();
+        let names: Vec<String> = groups.iter().map(|g| g.name().to_owned()).collect();
+        let mut offsets = committed_offsets(&self.admin, &names, TIMEOUT)?;
         let mut summaries = Vec::new();
         let mut committed_by_group = Vec::new();
-        for group in groups.groups() {
-            // Only consumer groups have offsets; skip Connect workers and the like.
-            if !matches!(group.protocol_type(), "consumer" | "")
-                || !self.scope.matches(group.name())
-            {
-                continue;
-            }
-            let committed = self.committed(group.name(), &partitions);
+        for group in groups {
+            let committed = offsets
+                .remove(group.name())
+                .unwrap_or_else(|| Ok(BTreeMap::new()));
             committed_by_group.push(committed);
             summaries.push(GroupSummary {
                 name: group.name().to_owned(),
@@ -105,7 +107,7 @@ impl Groups {
 
     pub(crate) fn describe(&self, name: &str) -> KafkaResult<GroupDetail> {
         let (state, members) = self.group_info(name)?;
-        let committed = self.committed(name, &self.all_partitions()?)?;
+        let committed = group_committed_offsets(&self.admin, name, TIMEOUT)?;
         let ends = self.end_offsets(&committed.keys().cloned().collect())?;
         let partitions = committed
             .into_iter()
@@ -138,9 +140,8 @@ impl Groups {
             Some(topic) => self.topic_partitions(topic).map_err(|e| e.to_string())?,
             None => Vec::new(),
         };
-        let mut committed = self
-            .committed(group, &self.all_partitions().map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
+        let mut committed =
+            group_committed_offsets(&self.admin, group, TIMEOUT).map_err(|e| e.to_string())?;
         if let Some(topic) = topic {
             committed.retain(|(t, _), _| t == topic);
         }
@@ -219,6 +220,8 @@ impl Groups {
             tpl.add_partition_offset(&o.topic, o.partition, Offset::Offset(o.offset))
                 .map_err(|e| e.to_string())?;
         }
+        // A client with the group's id commits for it. It never subscribes, so
+        // it never joins the group, and it is dropped when this returns.
         let client = self.client(group).map_err(|e| e.to_string())?;
         client
             .commit(&tpl, CommitMode::Sync)
@@ -257,11 +260,8 @@ impl Groups {
         Ok((GroupState::parse(group.state()), members))
     }
 
+    /// A client configured with `group`'s id, for committing its offsets.
     fn client(&self, group: &str) -> KafkaResult<Arc<BaseConsumer>> {
-        let mut clients = self.clients.lock().expect("group clients lock");
-        if let Some(client) = clients.get(group) {
-            return Ok(client.clone());
-        }
         let client: Arc<BaseConsumer> = Arc::new(
             self.base
                 .clone()
@@ -273,17 +273,7 @@ impl Groups {
         self.auth
             .attach(&client)
             .map_err(KafkaError::ClientCreation)?;
-        clients.insert(group.to_owned(), client.clone());
         Ok(client)
-    }
-
-    fn all_partitions(&self) -> KafkaResult<Vec<(String, i32)>> {
-        let metadata = self.admin.fetch_metadata(None, TIMEOUT)?;
-        Ok(metadata
-            .topics()
-            .iter()
-            .flat_map(|t| t.partitions().iter().map(|p| (t.name().to_owned(), p.id())))
-            .collect())
     }
 
     fn topic_partitions(&self, topic: &str) -> KafkaResult<Vec<(String, i32)>> {
@@ -297,28 +287,6 @@ impl Groups {
         Ok(t.partitions()
             .iter()
             .map(|p| (topic.to_owned(), p.id()))
-            .collect())
-    }
-
-    /// Committed offsets of `group` among `partitions`; partitions without a
-    /// commit are left out.
-    fn committed(
-        &self,
-        group: &str,
-        partitions: &[(String, i32)],
-    ) -> KafkaResult<BTreeMap<(String, i32), i64>> {
-        let mut tpl = TopicPartitionList::new();
-        for (topic, partition) in partitions {
-            tpl.add_partition(topic, *partition);
-        }
-        let committed = self.client(group)?.committed_offsets(tpl, TIMEOUT)?;
-        Ok(committed
-            .elements()
-            .iter()
-            .filter_map(|e| match e.offset() {
-                Offset::Offset(o) => Some(((e.topic().to_owned(), e.partition()), o)),
-                _ => None,
-            })
             .collect())
     }
 

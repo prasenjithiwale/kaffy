@@ -9,6 +9,7 @@ mod client;
 mod cluster;
 mod decoders;
 mod demo;
+mod group_offsets;
 mod groups;
 mod msk_iam;
 mod replay;

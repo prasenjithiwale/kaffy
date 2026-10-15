@@ -464,6 +464,41 @@ async fn group_lag_and_offset_reset() {
 
 #[tokio::test]
 #[ignore = "needs a Kafka broker"]
+async fn groups_outside_the_profile_scope_are_skipped() {
+    let topic = TestTopic::create().await;
+    produce(&topic.name, 0, "k", b"v").await;
+    let inside = unique("kaffy-scope-in");
+    let outside = unique("kaffy-scope-out");
+    commit_offsets(&inside, &topic.name, &[(0, 0)]);
+    commit_offsets(&outside, &topic.name, &[(0, 0)]);
+
+    let mut profile = writable();
+    profile.groups = kaffy_config::NameFilter::parse_list("kaffy-scope-in-*").unwrap();
+    let mut worker = kaffy_kafka::spawn(&profile).unwrap();
+    worker.commands.send(Command::ListGroups).unwrap();
+    let names: Vec<String> = expect(&mut worker, |e| match e {
+        Event::Groups(groups) => Some(groups.into_iter().map(|g| g.name).collect()),
+        _ => None,
+    })
+    .await;
+    assert!(names.contains(&inside), "{names:?}");
+    assert!(!names.contains(&outside), "{names:?}");
+    assert!(
+        names.iter().all(|n| n.starts_with("kaffy-scope-in-")),
+        "{names:?}"
+    );
+
+    let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
+        .set("bootstrap.servers", bootstrap())
+        .create()
+        .unwrap();
+    let _ = admin
+        .delete_groups(&[&inside, &outside], &AdminOptions::new())
+        .await;
+}
+
+#[tokio::test]
+#[ignore = "needs a Kafka broker"]
 async fn produce_and_filtered_replay() {
     let source = TestTopic::create().await;
     let target = TestTopic::create().await;
