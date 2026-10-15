@@ -247,7 +247,10 @@ async fn run(ctx: Context, mut commands: mpsc::UnboundedReceiver<Command>) {
                         .expect("metadata task panicked")
                     {
                         Ok(cluster) => Event::Cluster(cluster),
-                        Err(e) => Event::Error(format!("cluster: {e}")),
+                        Err(e) => Event::Failed {
+                            operation: Operation::DescribeCluster,
+                            message: format!("cluster: {e}"),
+                        },
                     };
                     let _ = events.send(event).await;
                 });

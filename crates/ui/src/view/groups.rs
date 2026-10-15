@@ -19,10 +19,14 @@ pub fn render_list(frame: &mut Frame, area: Rect, state: &mut AppState) {
     let visible = view.visible();
     let total = view.list.as_ref().map_or(0, Vec::len);
 
-    let mut block = kit::counted("Consumer groups", total).title(kit::note(
-        format!("↻ every {}s", REFRESH_EVERY.as_secs()),
-        theme::faint(),
-    ));
+    // Slow clusters take longer than the interval; say so rather than look stuck.
+    let refresh = if view.refresh.in_flight() && view.list.is_some() {
+        "↻ refreshing…".to_owned()
+    } else {
+        format!("↻ every {}s", REFRESH_EVERY.as_secs())
+    };
+    let mut block =
+        kit::counted("Consumer groups", total).title(kit::note(refresh, theme::faint()));
     if !view.scope.is_empty() {
         block = block.title(kit::scope_note(&view.scope));
     }

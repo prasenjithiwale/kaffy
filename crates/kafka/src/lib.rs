@@ -204,6 +204,7 @@ pub struct TruncateRow {
 /// The operation an [`Event::Failed`] belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operation {
+    DescribeCluster,
     ListGroups,
     DescribeGroup,
     PlanReset,

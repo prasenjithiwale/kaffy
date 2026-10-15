@@ -555,6 +555,7 @@ impl AppState {
                 self.clamp_topic_selection();
             }
             Event::Cluster(cluster) => {
+                self.brokers.refresh.answered();
                 self.connection = Connection::Connected {
                     brokers: cluster.brokers.len(),
                 };
@@ -575,6 +576,7 @@ impl AppState {
                 }
             }
             Event::Groups(mut list) => {
+                self.groups.refresh.answered();
                 list.retain(|g| self.groups.scope.matches(&g.name));
                 for group in &list {
                     if let Some(lag) = group.lag {
@@ -586,6 +588,7 @@ impl AppState {
             }
             Event::GroupDetail(detail) => {
                 if let Some(view) = self.group_detail.as_mut().filter(|v| v.name == detail.name) {
+                    view.refresh.answered();
                     let lag = detail.total_lag();
                     view.detail = Some(detail);
                     let name = view.name.clone();
@@ -614,7 +617,7 @@ impl AppState {
                 }
                 self.flash_info(format!("reset {partitions} partition(s) of {group}"));
                 if let Some(view) = self.group_detail.as_mut() {
-                    view.requested = None;
+                    view.refresh.expire();
                 }
             }
             Event::Produced {
@@ -663,6 +666,16 @@ impl AppState {
                 }
             }
             Event::Failed { operation, message } => {
+                match operation {
+                    Operation::DescribeCluster => self.brokers.refresh.answered(),
+                    Operation::ListGroups => self.groups.refresh.answered(),
+                    Operation::DescribeGroup => {
+                        if let Some(view) = self.group_detail.as_mut() {
+                            view.refresh.answered();
+                        }
+                    }
+                    _ => {}
+                }
                 if self.pending(operation) {
                     self.dialog = None;
                 }
@@ -1021,7 +1034,7 @@ impl AppState {
         self.subject = None;
         self.screen = Screen::Groups;
         self.group_detail = None;
-        self.groups.requested = Some(Instant::now());
+        self.groups.refresh.sent();
         let list = Effect::Kafka(Command::ListGroups);
         Some(match leave {
             Some(stop) => Effect::Many(vec![stop, list]),
@@ -1109,7 +1122,7 @@ impl AppState {
         self.group_detail = None;
         self.subject = None;
         self.screen = Screen::Brokers;
-        self.brokers.requested = Some(Instant::now());
+        self.brokers.refresh.sent();
         let describe = Effect::Kafka(Command::DescribeCluster);
         Some(match leave {
             Some(stop) => Effect::Many(vec![stop, describe]),
@@ -1134,7 +1147,7 @@ impl AppState {
             Action::Top => select(0),
             Action::Bottom => select(len),
             Action::Refresh => {
-                self.brokers.requested = Some(Instant::now());
+                self.brokers.refresh.sent();
                 return Some(Effect::Kafka(Command::DescribeCluster));
             }
             Action::Back => return self.show_topics(),
@@ -1263,20 +1276,20 @@ impl AppState {
             return None;
         }
         match self.screen {
-            Screen::Brokers if self.brokers.due() => {
-                self.brokers.requested = Some(Instant::now());
+            Screen::Brokers if self.brokers.refresh.due() => {
+                self.brokers.refresh.sent();
                 Some(Effect::Kafka(Command::DescribeCluster))
             }
-            Screen::Groups if self.groups.due() => {
-                self.groups.requested = Some(Instant::now());
+            Screen::Groups if self.groups.refresh.due() => {
+                self.groups.refresh.sent();
                 Some(Effect::Kafka(Command::ListGroups))
             }
             Screen::GroupDetail => {
                 let view = self.group_detail.as_mut()?;
-                if !view.due() {
+                if !view.refresh.due() {
                     return None;
                 }
-                view.requested = Some(Instant::now());
+                view.refresh.sent();
                 Some(Effect::Kafka(Command::DescribeGroup(view.name.clone())))
             }
             _ => None,
@@ -1296,7 +1309,7 @@ impl AppState {
             Action::Top => select(0),
             Action::Bottom => select(len),
             Action::Refresh => {
-                self.groups.requested = Some(Instant::now());
+                self.groups.refresh.sent();
                 return Some(Effect::Kafka(Command::ListGroups));
             }
             Action::Back if !self.groups.filter.is_empty() => self.set_filter(String::new()),
@@ -1316,7 +1329,7 @@ impl AppState {
 
     fn open_group(&mut self, name: String) -> Effect {
         let mut view = GroupDetailView::new(name.clone());
-        view.requested = Some(Instant::now());
+        view.refresh.sent();
         self.group_detail = Some(view);
         self.screen = Screen::GroupDetail;
         Effect::Kafka(Command::DescribeGroup(name))
@@ -1335,13 +1348,13 @@ impl AppState {
             Action::Top => select(0),
             Action::Bottom => select(len),
             Action::Refresh => {
-                view.requested = Some(Instant::now());
+                view.refresh.sent();
                 return Some(Effect::Kafka(Command::DescribeGroup(view.name.clone())));
             }
             Action::Back => {
                 self.group_detail = None;
                 self.screen = Screen::Groups;
-                self.groups.requested = Some(Instant::now());
+                self.groups.refresh.sent();
                 return Some(Effect::Kafka(Command::ListGroups));
             }
             Action::ResetOffsets => {
@@ -2551,7 +2564,7 @@ mod tests {
             Some(Effect::Kafka(Command::DescribeCluster))
         );
         assert_eq!(state.update(Action::Tick), None, "just refreshed");
-        state.brokers.requested = None;
+        state.brokers.refresh.answered_long_ago();
         assert_eq!(
             state.update(Action::Tick),
             Some(Effect::Kafka(Command::DescribeCluster))
@@ -2565,7 +2578,7 @@ mod tests {
             Some(Effect::Kafka(Command::ListTopics))
         );
         assert_eq!(state.screen, Screen::Topics);
-        state.brokers.requested = None;
+        state.brokers.refresh.answered_long_ago();
         assert_eq!(
             state.update(Action::Tick),
             None,
@@ -2868,11 +2881,62 @@ mod tests {
     }
 
     #[test]
+    fn auto_refresh_waits_for_the_answer() {
+        let mut state = with_topics();
+        state.update(Action::ShowGroups);
+        // In flight: no new request, however long it takes.
+        state.groups.refresh.expire();
+        assert_eq!(state.update(Action::Tick), None, "still waiting");
+        // The answer restarts the interval.
+        group_list(&mut state, kaffy_kafka::GroupState::Stable);
+        assert_eq!(state.update(Action::Tick), None, "just answered");
+        state.groups.refresh.answered_long_ago();
+        assert_eq!(
+            state.update(Action::Tick),
+            Some(Effect::Kafka(Command::ListGroups))
+        );
+        // A failure ends the request too.
+        state.groups.refresh.expire();
+        assert_eq!(state.update(Action::Tick), None, "in flight again");
+        state.on_event(Event::Failed {
+            operation: Operation::ListGroups,
+            message: "timed out".into(),
+        });
+        state.groups.refresh.expire();
+        assert_eq!(
+            state.update(Action::Tick),
+            Some(Effect::Kafka(Command::ListGroups))
+        );
+        // The user can always ask, even with a request in flight.
+        assert_eq!(
+            state.update(Action::Refresh),
+            Some(Effect::Kafka(Command::ListGroups))
+        );
+    }
+
+    #[test]
+    fn brokers_refresh_waits_for_a_failed_answer() {
+        let mut state = writable(false);
+        state.update(Action::ShowBrokers);
+        state.brokers.refresh.expire();
+        assert_eq!(state.update(Action::Tick), None);
+        state.on_event(Event::Failed {
+            operation: Operation::DescribeCluster,
+            message: "cluster: timed out".into(),
+        });
+        state.brokers.refresh.expire();
+        assert_eq!(
+            state.update(Action::Tick),
+            Some(Effect::Kafka(Command::DescribeCluster))
+        );
+    }
+
+    #[test]
     fn groups_refresh_while_open() {
         let mut state = with_topics();
         state.update(Action::ShowGroups);
         assert_eq!(state.update(Action::Tick), None, "just refreshed");
-        state.groups.requested = None;
+        state.groups.refresh.answered_long_ago();
         assert_eq!(
             state.update(Action::Tick),
             Some(Effect::Kafka(Command::ListGroups))
@@ -2889,7 +2953,12 @@ mod tests {
             state.update(Action::Open),
             Some(Effect::Kafka(Command::DescribeGroup("billing".into())))
         );
-        state.group_detail.as_mut().unwrap().requested = None;
+        state
+            .group_detail
+            .as_mut()
+            .unwrap()
+            .refresh
+            .answered_long_ago();
         assert_eq!(
             state.update(Action::Tick),
             Some(Effect::Kafka(Command::DescribeGroup("billing".into())))
