@@ -234,6 +234,8 @@ use kaffy_kafka::{
     GroupState, Header, Operation, Payload, ProduceRequest, RecordFilter, ReplayEnd, ResetTarget,
 };
 use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer};
+use rdkafka::error::KafkaError;
+use rdkafka::types::RDKafkaErrorCode;
 use rdkafka::{Offset, TopicPartitionList};
 
 /// Waits for the first event `pick` accepts; fails on an unexpected `Failed`.
@@ -297,7 +299,20 @@ fn commit_offsets(group: &str, topic: &str, offsets: &[(i32, i64)]) {
         tpl.add_partition_offset(topic, partition, Offset::Offset(offset))
             .unwrap();
     }
-    consumer.commit(&tpl, CommitMode::Sync).unwrap();
+    // A fresh broker answers "not coordinator" (or "loading") for a while
+    // after the first group appears; retry those.
+    for _ in 0..40 {
+        match consumer.commit(&tpl, CommitMode::Sync) {
+            Ok(()) => return,
+            Err(KafkaError::ConsumerCommit(
+                RDKafkaErrorCode::NotCoordinator
+                | RDKafkaErrorCode::CoordinatorLoadInProgress
+                | RDKafkaErrorCode::CoordinatorNotAvailable,
+            )) => std::thread::sleep(Duration::from_millis(250)),
+            Err(e) => panic!("committing offsets for {group}: {e}"),
+        }
+    }
+    panic!("committing offsets for {group}: the coordinator never became available");
 }
 
 #[tokio::test]
